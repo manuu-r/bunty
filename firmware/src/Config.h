@@ -2,7 +2,6 @@
 
 #include <driver/i2s.h>
 #include <stdint.h>
-#include "VoiceActivity.h"
 
 // Every board wiring detail, protocol constant, and behavioural tunable for
 // Bunty. Nothing here allocates or depends on the rest of the firmware, so a
@@ -30,9 +29,10 @@ constexpr int kTouchScl = 47;
 constexpr int kTouchInterrupt = 46;
 
 constexpr int kTurnServo = 9;   // SG90, head yaw
-constexpr int kTiltServo = 14;  // MG90S, head pitch
+constexpr int kTiltServo = 14;  // SG90, head pitch
 
-// UART0's pads are free for the amplifier: Serial runs over native USB.
+// MAX98357 amplifier. UART0's pads are free for it: Serial runs over native
+// USB. Nothing drives audio yet; SD is held low so the amp stays shut down.
 constexpr int kAmpShutdown = 2;
 constexpr int kAmpBclk = 15;
 constexpr int kAmpLrc = 43;
@@ -44,8 +44,7 @@ constexpr int kMicWs = 12;
 constexpr int kMicData = 13;
 }  // namespace pin
 
-// The amplifier and the microphone each own an I2S controller for the whole
-// run; neither driver is installed on the other's port.
+// Give the amplifier and the microphones their own I2S controller each.
 constexpr i2s_port_t kSpeakerPort = I2S_NUM_0;
 constexpr i2s_port_t kMicrophonePort = I2S_NUM_1;
 
@@ -78,8 +77,14 @@ constexpr uint16_t kDanger = rgb565(255, 102, 118);
 
 namespace servo {
 constexpr bool kEnabled = true;
+// Temporary bench check: at boot, sweep yaw then pitch fast, then home.
+constexpr bool kBootDemo = false;
+// Head gestures between dashboard pages.
+constexpr bool kPageSweep = true;
+constexpr float kBootDemoDegreesPerSecond = 360.0f;
+constexpr float kBootDemoSweepDegrees = 70.0f;
 constexpr bool kTurnEnabled = true;
-// Both axes are wired on this carrier: SG90 on the yaw, MG90S on the pitch.
+// Both axes are wired on this carrier, each with an SG90.
 constexpr bool kTiltEnabled = true;
 constexpr uint8_t kTurnChannel = 2;
 constexpr uint8_t kTiltChannel = 3;
@@ -111,52 +116,12 @@ constexpr uint32_t kDebounceMs = 120;
 // cannot leave the panel permanently unresponsive.
 constexpr uint32_t kReconfigureMs = 4000;
 constexpr uint32_t kSampleMs = 15;
-// Draws a ring where each touch landed. Leave on until the panel's orientation
-// has been confirmed on the real device.
-constexpr bool kShowMarker = true;
-
 // The panel is mounted 180 degrees from the controller's origin: a touch at
 // the bottom left reports as the top right.
 constexpr bool kSwapXY = false;
 constexpr bool kInvertX = true;
 constexpr bool kInvertY = true;
 }  // namespace touch
-
-// ------------------------------------------------------------ microphones ---
-
-namespace mic {
-constexpr uint32_t kSampleRate = 16000;
-constexpr int32_t kVoiceCaptureGain = 8;
-// Swap these if Bunty turns away from the talker: it depends on how the L/R
-// straps were soldered.
-constexpr uint8_t kLeftSlot = 0;
-constexpr uint8_t kVoiceSlot = 0;
-
-// Centre-to-centre. MEASURE THIS: every bearing scales directly with it.
-constexpr float kSpacingMm = 60.0f;
-constexpr float kSpeedOfSoundMmPerMs = 343.0f;  // 20 C, dry air
-}  // namespace mic
-
-// -------------------------------------------------------- sound direction ---
-
-// At 16 kHz and 60 mm apart the whole usable range is under three samples, so
-// this is a coarse bearing, never a precise angle.
-namespace hearing {
-constexpr size_t kWindowSamples = 256;
-constexpr int kMaxLagSamples = 4;
-constexpr uint32_t kMinimumRms = 900;
-// Reverberation and two talkers both show up as a low, flat correlation peak.
-constexpr uint8_t kMinimumConfidence = 35;
-constexpr uint8_t kAgreeingWindows = 3;
-constexpr float kAgreementDegrees = 20.0f;
-constexpr uint32_t kFreshMs = 1500;
-
-// A head that twitches at every syllable reads as nervous, not attentive.
-constexpr float kDeadzoneDegrees = 12.0f;
-constexpr float kMaximumTurnDegrees = 45.0f;
-constexpr uint32_t kTurnCooldownMs = 1200;
-constexpr float kTurnDegreesPerSecond = 45.0f;
-}  // namespace hearing
 
 // ----------------------------------------------------------------- power ---
 
@@ -175,27 +140,16 @@ constexpr uint16_t kReserveMilliamps = 350;
 constexpr uint16_t kBaseMilliamps = 300;      // module, panel, radio average
 constexpr uint16_t kBacklightMilliamps = 80;  // at full duty
 constexpr uint16_t kServoMilliamps = 750;     // SG90 under load
-constexpr uint16_t kAudioMilliamps = 450;     // MAX98357 into 4 ohm, loud
 constexpr uint16_t kBatteryMilliampHours = 1500;
 
 // The policy falls out of this arithmetic rather than out of special cases:
-// exactly one large load runs at a time, and audio outranks motion.
+// exactly one servo runs at a time.
 static_assert(kBaseMilliamps + kBacklightMilliamps + kServoMilliamps <=
                   kRailMilliamps - kReserveMilliamps,
               "one servo must fit inside the rail budget");
-static_assert(kBaseMilliamps + kBacklightMilliamps + kAudioMilliamps <=
-                  kRailMilliamps - kReserveMilliamps,
-              "the speaker must fit inside the rail budget");
-static_assert(kBaseMilliamps + kBacklightMilliamps + kServoMilliamps +
-                      kAudioMilliamps >
-                  kRailMilliamps - kReserveMilliamps,
-              "a servo must not be able to run while Bunty is speaking");
 static_assert(kBaseMilliamps + kBacklightMilliamps + 2 * kServoMilliamps >
                   kRailMilliamps - kReserveMilliamps,
               "two servos at once must not fit inside the rail budget");
-
-// How long a displaced load waits, so the two never overlap on the rail.
-constexpr uint32_t kRevokeSettleMs = 40;
 
 // Quarter-dBm; 52 is 13 dBm, roughly halving the TX burst the reserve covers.
 constexpr int8_t kWifiTxPowerQuarterDbm = 52;
@@ -207,11 +161,9 @@ constexpr uint8_t kActiveCpuMhz = 240;
 
 constexpr uint32_t kConservativeMs = 10 * 60 * 1000;
 constexpr uint8_t kConservativeBacklight = 160;
-constexpr int32_t kConservativeVolumePercent = 45;
 constexpr float kConservativeServoDegreesPerSecond = 20.0f;
 
 constexpr uint8_t kSaverBacklight = 60;
-constexpr int32_t kSaverVolumePercent = 30;
 // Disabled by default: the gauge has no feedback and drifts.
 constexpr uint8_t kSaverPercent = 0;
 constexpr uint32_t kFuelPersistMs = 60000;
@@ -242,7 +194,7 @@ constexpr uint16_t kMtu = 185;
 
 constexpr uint32_t kWifiJoinTimeoutMs = 30000;
 // Bluedroid owns a large share of internal heap. Hold the "connected" screen
-// briefly, then release Bluetooth before audio claims DMA memory.
+// briefly, then release it for Wi-Fi and the dashboard.
 constexpr uint32_t kShutdownDelayMs = 2500;
 constexpr uint32_t kActivityFrameMs = 420;
 }  // namespace pairing
@@ -278,85 +230,16 @@ constexpr size_t kEventRowsPerPage = 5;
 constexpr size_t kTodoRowsPerPage = 6;
 }  // namespace dashboard
 
-// ----------------------------------------------------------------- audio ---
-
-namespace audio {
-// Aura's replies and the boot greeting are both MP3; the decoder reports each
-// stream's real rate and the speaker is reconfigured to match.
-constexpr uint32_t kMicrophoneSampleRate = 16000;
-constexpr int32_t kGreetingVolumePercent = 30;
-constexpr int32_t kSpeakingVolumePercent = 70;
-
-constexpr int kDmaBufferCount = 6;
-constexpr int kDmaBufferLength = 256;
-// The DMA still holds kDmaBufferCount * kDmaBufferLength frames after the last
-// i2s_write returns. Acknowledging before those samples reach the amplifier
-// would unmute the microphone while Bunty is still audibly talking.
-constexpr uint32_t kDmaDrainMs =
-    (kDmaBufferCount * kDmaBufferLength * 1000) / kMicrophoneSampleRate + 40;
-
-// Compressed-input working set for the Helix decoder. The greeting reads from
-// flash and needs only enough to span one frame plus its bit reservoir; the
-// gateway reply absorbs bursty WebSocket packets.
-constexpr size_t kGreetingInputBytes = 4096;
-constexpr size_t kReplyInputBytes = 8192;
-}  // namespace audio
-
-// ----------------------------------------------------------------- voice ---
-
-namespace voice {
-// VAD frame size, mode, endpoint and idle timeout live in VoiceActivity.h.
-static_assert(audio::kMicrophoneSampleRate == kVadSampleRate,
-              "VAD and capture sample rates must match");
-
-// VAD starts the network connection. Keep several seconds in PSRAM so speech is
-// not lost while the main loop finishes a dashboard TCP timeout and TLS.
-constexpr size_t kCaptureRingBytes = 307200;   // ~9.6 s at 16 kHz.
-// Aura can return a whole sentence faster than the speaker can play its decoded
-// PCM. Keep the compressed MP3 burst in PSRAM instead of dropping it.
-constexpr size_t kPlaybackRingBytes = 196608;
-// A socket can open and then stall before session.ready if the gateway or the
-// Flux leg never completes. Without a ceiling the client would wait forever.
-constexpr uint32_t kConnectTimeoutMs = 15000;
-// Close an application-idle turn even if the WebSocket heartbeat is healthy.
-// Microphone PCM, gateway controls, and audible reply playback all refresh
-// this timer; protocol ping/pong frames deliberately do not.
-constexpr uint32_t kSocketIdleTimeoutMs = 20000;
-constexpr uint32_t kStartRetryMs = 5000;
-constexpr int kSocketBufferBytes = 4096;
-constexpr int kSocketTaskStack = 6144;
-constexpr int kSocketTaskPriority = 5;
-constexpr int kPingIntervalSec = 10;
-constexpr int kPingTimeoutSec = 25;
-
-// Entering and leaving Bunty's face costs a full-screen clear plus a dashboard
-// redraw. Holding it briefly stops a marginal detection from strobing between
-// the two.
-constexpr uint32_t kFaceMinimumMs = 1500;
-constexpr uint32_t kMouthFrameMs = 50;
-constexpr uint32_t kWaveformFrameMs = 45;
-// One sample per redraw; sized to the number of bars that fit across the panel.
-constexpr size_t kWaveformSamples = 58;
-// This microphone's quiet floor is roughly 70 RMS and normal speech a few
-// hundred; a higher ceiling made genuine speech look almost flat on screen.
-constexpr uint32_t kWaveformFullScaleRms = 900;
-constexpr uint32_t kHeartbeatMs = 3000;
-}  // namespace voice
-
 // --------------------------------------------------------------- network ---
 
 namespace net {
-// TLS certificate validity depends on a real clock.
-constexpr time_t kMinimumTrustedUnixTime = 1704067200;  // 2024-01-01 UTC
-constexpr uint32_t kClockSyncRetryMs = 30000;
 constexpr uint32_t kMdnsQueryTimeoutMs = 3000;
 }  // namespace net
 
 // ------------------------------------------------------- persisted state ---
 
-// NVS namespace and keys. Unpairing clears kGaugeKeys only; the IoT gateway
-// credential and the Bluetooth address are provisioned once and survive
-// re-pairing, so this accessory keeps one identity for its whole life.
+// NVS namespace and keys. Unpairing clears kGaugeKeys only; the Bluetooth
+// address is minted once and survives re-pairing, so this accessory keeps one identity for its whole life.
 namespace nvs {
 constexpr char kNamespace[] = "bunty";
 
@@ -376,10 +259,6 @@ constexpr char kBleAddress[] = "ble_addr";
 
 constexpr char kBrownouts[] = "brownouts";
 constexpr char kFuelUsed[] = "fuel_mas";
-
-constexpr char kIotToken[] = "iot_token";
-constexpr char kIotDevice[] = "iot_device";
-constexpr char kIotSession[] = "iot_session";
 
 constexpr const char *kGaugeKeys[] = {
     kApiVersion, kDeviceId, kServerId,     kToken,     kServiceType,

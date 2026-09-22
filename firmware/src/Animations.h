@@ -19,22 +19,6 @@ class BuntyAnimations {
   void beginSpeaking(uint32_t now, bool present = true);
   void serviceSpeaking(uint32_t now);
 
-  // A stroked vector mouth below the eyes. `openness` is 0-100 and is meant to
-  // track live speech loudness. Only the band the mouth can occupy is redrawn,
-  // so it composes over an existing speaking frame without disturbing the eyes.
-  void drawSpeakingMouth(uint8_t openness);
-
-  // A listening glyph shown between the status bar and the eyes while voice is
-  // armed by the wake word. Both calls repaint only that band.
-  void drawWakeIcon();
-  void clearWakeIcon();
-
-  // A scrolling level history along the bottom edge, drawn while Bunty is
-  // capturing speech. `levels` is a ring of 0-100 values; `head` is the index
-  // the next sample would occupy, so the oldest bar is drawn leftmost.
-  void drawInputWaveform(const uint8_t *levels, size_t count, size_t head);
-  void clearInputWaveform();
-
   void beginSleeping(uint32_t now);
   void serviceSleeping(uint32_t now);
 

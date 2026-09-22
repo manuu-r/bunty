@@ -1,4 +1,5 @@
 #include "ServoMotion.h"
+#include "Log.h"
 #include "Memory.h"
 
 bool ServoMotion::begin(uint8_t pin, uint8_t channel, uint8_t initialAngle) {
@@ -68,6 +69,9 @@ void ServoMotion::applyTarget(float angle) {
                                              : targetAngle_ - angle;
   if (!moving_ && pending < 0.1f) return;
 
+  logPrintf("[servo] channel %u move %d -> %d degrees at %d deg/s\n",
+            unsigned(channel_), int(currentAngle_), int(angle),
+            int(degreesPerSecond_.load()));
   startAngle_ = currentAngle_;
   targetAngle_ = angle;
   const float distance = targetAngle_ > startAngle_

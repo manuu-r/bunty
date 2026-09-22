@@ -59,10 +59,8 @@ void showSyncing(bool failed = false);
 void drawControls();
 // Draws where the panel thinks the finger landed, so a mirrored axis is
 // visible on the device instead of only over a serial cable.
-void drawTouchMarker(int16_t x, int16_t y);
 
 bool settingsControlAt(int16_t x, int16_t y);
-bool voiceControlAt(int16_t x, int16_t y);
 
 struct SettingsStatus {
   bool paired = false;

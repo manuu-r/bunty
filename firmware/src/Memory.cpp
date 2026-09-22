@@ -1,7 +1,6 @@
 #include "Log.h"
 #include "Memory.h"
 #include "Ui.h"
-#include "Audio.h"
 #include "Dashboard.h"
 #include "flow32/graphics/Display.h"
 
@@ -51,7 +50,6 @@ void report() {
   portEXIT_CRITICAL(&mux);
   for (const auto &task : copy) if (task.name)
     logPrintf("[memory] task=%s core=%d stack_min_free=%u bytes\n", task.name, task.core, unsigned(task.minimum));
-  logPrintf("[memory] helix_internal_allocated=%u\n", unsigned(mp3DecoderAllocatedBytes()));
   dashboard::reportMemory();
   ui::Guard guard;
   ui::display().reportMemory();

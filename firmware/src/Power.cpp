@@ -22,8 +22,6 @@ uint32_t startedAt_ = 0;
 portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
 bool claimed_[static_cast<size_t>(Load::kCount)] = {};
 
-RevokeHandler revoke_[static_cast<size_t>(Load::kCount)] = {};
-bool audioExpected_ = false;
 bool txPowerApplied_ = false;
 
 uint32_t lastBusyAt_ = 0;
@@ -36,13 +34,10 @@ uint32_t lastPersistedAt_ = 0;
 constexpr uint32_t kCapacityMilliampSeconds =
     static_cast<uint32_t>(kBatteryMilliampHours) * 3600u;
 
-uint8_t priority(Load load) { return load == Load::kAudio ? 1 : 0; }
-
 uint16_t loadMilliamps(Load load) {
   switch (load) {
     case Load::kTurnServo:
     case Load::kTiltServo: return kServoMilliamps;
-    case Load::kAudio: return kAudioMilliamps;
     case Load::kCount: break;
   }
   return 0;
@@ -59,7 +54,6 @@ uint16_t committedLocked() {
 void setRadioSleep(bool sleep) {
   if (radioSleeping_ == sleep) return;
   radioSleeping_ = sleep;
-  // Voice is latency-bound; the dashboard's retry path tolerates modem sleep.
   WiFi.setSleep(sleep);
 }
 
@@ -113,40 +107,20 @@ void begin(Preferences &storage) {
 
 bool claim(Load load) {
   if (load == Load::kCount) return false;
-  if (mode_ == Mode::kSaver && load != Load::kAudio) return false;
+  if (mode_ == Mode::kSaver) return false;
   const size_t index = static_cast<size_t>(load);
   const uint16_t headroom = kRailMilliamps - kReserveMilliamps;
 
-  // Handlers run after the lock is dropped: they touch queues.
-  RevokeHandler pending[static_cast<size_t>(Load::kCount)] = {};
   bool granted = false;
-  bool revoked = false;
 
   taskENTER_CRITICAL(&lock_);
   if (claimed_[index]) {
     granted = true;  // already ours; claiming twice is not an error
-  } else {
-    uint16_t committed = committedLocked();
-    if (committed + loadMilliamps(load) > headroom) {
-      for (size_t i = 0; i < static_cast<size_t>(Load::kCount); ++i) {
-        if (!claimed_[i] || priority(static_cast<Load>(i)) >= priority(load)) continue;
-        claimed_[i] = false;
-        committed -= loadMilliamps(static_cast<Load>(i));
-        pending[i] = revoke_[i];
-        revoked = true;
-        if (committed + loadMilliamps(load) <= headroom) break;
-      }
-    }
-    if (committed + loadMilliamps(load) <= headroom) {
-      claimed_[index] = true;
-      granted = true;
-    }
+  } else if (committedLocked() + loadMilliamps(load) <= headroom) {
+    claimed_[index] = true;
+    granted = true;
   }
   taskEXIT_CRITICAL(&lock_);
-
-  for (size_t i = 0; i < static_cast<size_t>(Load::kCount); ++i) {
-    if (pending[i]) pending[i]();
-  }
 
   if (!granted) {
     logPrintf("[power] refused a %u mA load; %u mA already committed\n",
@@ -156,24 +130,8 @@ bool claim(Load load) {
   }
 
   markBusy();
-  if (load == Load::kAudio) setRadioSleep(false);
-  if (revoked) {
-    // Let the motor wind down so the two loads never overlap, even briefly.
-    logPrintf("[power] pre-empted motion for a %u mA load\n",
-              static_cast<unsigned>(loadMilliamps(load)));
-    vTaskDelay(pdMS_TO_TICKS(kRevokeSettleMs));
-  }
   return true;
 }
-
-void onRevoked(Load load, RevokeHandler handler) {
-  if (load == Load::kCount) return;
-  revoke_[static_cast<size_t>(load)] = handler;
-}
-
-bool audioBusy() { return audioExpected_ || held(Load::kAudio); }
-
-void setAudioExpected(bool expected) { audioExpected_ = expected; }
 
 void release(Load load) {
   if (load == Load::kCount) return;
@@ -207,7 +165,7 @@ void service() {
   bool busy = false;
   for (size_t i = 0; i < static_cast<size_t>(Load::kCount); ++i) busy |= claimed_[i];
   setIdle(!busy && now - lastBusyAt_ >= kIdleAfterMs);
-  setRadioSleep(!held(Load::kAudio));
+  setRadioSleep(true);
   if (!txPowerApplied_ && WiFi.status() == WL_CONNECTED) {
     txPowerApplied_ = true;
     WiFi.setTxPower(static_cast<wifi_power_t>(kWifiTxPowerQuarterDbm));
@@ -233,13 +191,6 @@ uint8_t backlightCeiling() {
     case Mode::kNormal: break;
   }
   return 255;
-}
-
-int32_t volumeCeiling(int32_t requestedPercent) {
-  int32_t ceiling = 100;
-  if (mode_ == Mode::kConservative) ceiling = kConservativeVolumePercent;
-  if (mode_ == Mode::kSaver) ceiling = kSaverVolumePercent;
-  return requestedPercent < ceiling ? requestedPercent : ceiling;
 }
 
 float servoSpeed(float requestedDegreesPerSecond) {

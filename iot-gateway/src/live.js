@@ -549,6 +549,15 @@ export class LiveSession {
         // Flux's timeout remains a safe fallback if this optional verifier is
         // temporarily unavailable; do not fail an otherwise healthy turn.
         this.logFailure("turn_detection_failed", error, { turn: turnIndex });
+        // Flux already proposed this endpoint; without a verifier, accept it
+        // now rather than let the device's silence watchdog close the turn.
+        if (
+          !this.stopped &&
+          !this.inputEnded &&
+          this.turnDetectionGeneration === generation
+        ) {
+          this.endInput();
+        }
       });
   }
 
@@ -587,6 +596,7 @@ export class LiveSession {
       typeof message?.transcript === "string" ? message.transcript.trim() : "";
 
     if (transcript) this.latestTranscripts.set(turnIndex, transcript);
+    console.log(JSON.stringify({ event: "flux", type: eventType, turn: turnIndex, text: transcript }));
 
     if (eventType === "StartOfTurn") {
       this.cancelTurnDetection();

@@ -1,5 +1,6 @@
 #include "Log.h"
 #include "Dashboard.h"
+#include "DashboardCache.h"
 
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
@@ -86,14 +87,6 @@ uint16_t round_ = 0;
 uint8_t connectFailures_ = 0;
 bool mdnsStarted_ = false;
 
-uint32_t hash(const char *body, size_t length) {
-  uint32_t value = 2166136261u;  // FNV-1a
-  for (size_t i = 0; i < length; ++i) {
-    value = (value ^ static_cast<uint8_t>(body[i])) * 16777619u;
-  }
-  return value;
-}
-
 // Replaces the live snapshot if `body` is a well-formed document for the
 // protocol and schema this firmware renders.
 bool adopt(const char *body, size_t length) {
@@ -109,6 +102,8 @@ bool adopt(const char *body, size_t length) {
     return false;
   }
 
+  dashboard_cache::preserveQuota(candidate, snapshot_);
+  if (candidate.overflowed() || measureJson(candidate) > bodyCapacity_) return false;
   snapshot_ = std::move(candidate);
   liveArena_ = spare;
   available_ = true;
@@ -133,7 +128,7 @@ void loadCached() {
   if (storage_->getBytes(cfg::nvs::kDashboard, body, length) == length) {
     // The parsed document copies every string it keeps, so the raw bytes are
     // released immediately rather than held for the life of the snapshot.
-    if (adopt(body, length)) snapshotHash_ = hash(body, length);
+    if (adopt(body, length)) snapshotHash_ = dashboard_cache::fingerprint(snapshot_);
   }
   logPrintf("[dashboard] cached snapshot %u bytes, %s\n",
                 static_cast<unsigned>(length),
@@ -361,21 +356,22 @@ void fetchTask(void *) {
 }
 
 bool acceptFetched() {
-  const uint32_t bodyHash = hash(body_, bodyLength_);
   if (!adopt(body_, bodyLength_)) {
     Serial.println("[dashboard] invalid or over-budget snapshot");
     return false;
   }
 
-  const uint32_t seconds = snapshot_["refresh_seconds"] | 120;
-  refreshMs_ = constrain(seconds, kMinimumRefreshSeconds,
-                         kMaximumRefreshSeconds) * 1000U;
+  // Gauge serves an in-memory snapshot; polling does not query providers.
+  refreshMs_ = kMinimumRefreshSeconds * 1000U;
+  const uint32_t bodyHash = dashboard_cache::fingerprint(snapshot_);
   if (bodyHash != snapshotHash_) {
-    snapshotHash_ = bodyHash;
+    // Persist the merged snapshot, including preserved last-good quotas.
+    bodyLength_ = serializeJson(snapshot_, body_, bodyCapacity_ + 1);
     if (storage_->putBytes(cfg::nvs::kDashboard, body_,
                            bodyLength_) != bodyLength_) {
       Serial.println("[dashboard] could not persist snapshot");
     } else {
+      snapshotHash_ = bodyHash;
       logPrintf("[dashboard] cached %u bytes\n",
                     static_cast<unsigned>(bodyLength_));
     }
@@ -404,7 +400,7 @@ void drawHeader(const char *title) {
 
 void drawFooter() {
   ui::drawControls();
-  ui::drawText(BuntyFonts::kBody, online_ ? "LIVE" : "CACHED", 85, 301,
+  ui::drawText(BuntyFonts::kBody, (online_ && !(snapshot_["quota_cached"] | false)) ? "LIVE" : "CACHED", 85, 301,
                online_ ? cfg::ui::kSuccess : cfg::ui::kMuted);
 }
 

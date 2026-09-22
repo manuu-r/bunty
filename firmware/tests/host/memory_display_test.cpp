@@ -4,7 +4,6 @@
 #include <map>
 #include <vector>
 #include "Memory.h"
-#include "ControlMessage.h"
 #include "InternalAllocation.h"
 #include "flow32/graphics/Display.h"
 
@@ -205,26 +204,6 @@ int main() {
     testCurrentTask = reinterpret_cast<void *>(1);
   }
   assert(allocations.empty());
-  using Result = ControlMessage::Result;
-  char buffer[9];
-  ControlMessage control;
-  control.bind(buffer, 8);
-  assert(control.append(1, "{\"a\"", 4, 7, 0) == Result::More);
-  assert(control.append(1, ":1}", 3, 7, 4) == Result::Text);
-  assert(strcmp(buffer, "{\"a\":1}") == 0);
-  assert(control.append(1, "12345678", 8, 8, 0) == Result::Text);
-  assert(buffer[8] == 0);
-  assert(control.append(1, "a", 1, 9, 0) == Result::Invalid);
-  assert(control.append(1, "a", 1, 1, -1) == Result::Invalid);
-  assert(control.append(1, "aa", 2, 1, 0) == Result::Invalid);
-  assert(control.append(1, "a", 1, 8, 0) == Result::More);
-  assert(control.append(1, "a", 1, 8, 3) == Result::Invalid);
-  assert(control.append(0, "a", 1, 1, 0) == Result::Invalid);
-  assert(control.append(2, "a", 1, 1, 0) == Result::Audio);
-  assert(control.append(9, "a", 1, 1, 0) == Result::Ignore);
-  assert(control.append(0, "a", 1, 1, 0) == Result::Audio);
-  control.reset();
-  assert(control.append(0, "a", 1, 1, 0) == Result::Invalid);
   std::cerr << "Testing color display\n";
   testDisplay(true);
   std::cerr << "Testing monochrome display\n";
@@ -233,5 +212,5 @@ int main() {
   testFailures();
   std::cerr << "Testing JSON arenas\n";
   testArena();
-  std::cout << "PASS: task-scoped internal allocation, bounded websocket controls, display placement, dirty regions, clipping, monochrome fallback, allocation failures, no drawing allocations, bounded JSON and snapshot reuse\n";
+  std::cout << "PASS: task-scoped internal allocation, display placement, dirty regions, clipping, monochrome fallback, allocation failures, no drawing allocations, bounded JSON and snapshot reuse\n";
 }

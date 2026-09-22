@@ -322,7 +322,6 @@ String identityJson() {
   document["capabilities"][0] = "dashboard.pull";
   document["capabilities"][1] = "dashboard.cache";
   document["capabilities"][2] = "display";
-  document["capabilities"][3] = "audio.output";
   String json;
   serializeJson(document, json);
   return json;
@@ -476,8 +475,7 @@ bool service() {
   }
 
   if (completedAt_ != 0 && millis() - completedAt_ > kShutdownDelayMs) {
-    // Bluedroid owns a large portion of internal heap. Release it before the
-    // I2S driver allocates DMA memory for the greeting.
+    // Bluedroid owns a large portion of internal heap; release it once done.
     stop();
     return true;
   }
