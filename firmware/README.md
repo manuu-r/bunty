@@ -61,6 +61,8 @@ reported on UART and prevents local pairing confirmation.
 - Pairing: compare the numbers, then press the on-screen Yes or No button.
 - Dashboard and connection screen: touch the Settings button at bottom-left (a 56 x 50 pixel area), or long-press anywhere, to open settings.
 - Settings: view connection status, disconnect, or unpair with explicit Yes/No confirmation.
+- Dashboard: touch the microphone button at bottom-right to start a conversation.
+- Conversation: touch anywhere to end it while Bunty listens, or to cut Bunty off mid-reply and talk again.
 - Sleeping: touch the screen to wake. That touch does nothing else.
 
 Unpairing preserves unrelated
@@ -88,12 +90,46 @@ kept current while the stats are hidden. Bunty disables ESP32 modem sleep for
 this always-on LAN connection, refreshes Bonjour after a failed socket, and
 reconnects its Wi-Fi station after three consecutive connection failures.
 
+## Voice conversation
+
+Tapping the mic starts conversation mode against the IoT gateway's `/v1/live`
+route (Flux STT, Claude, Aura TTS). Bunty opens a WebSocket at once and streams
+16 kHz linear16 audio from the microphones; the gateway's Smart Turn decides
+when you have finished speaking. The reply comes back as 16 kHz linear16 PCM
+and plays through the MAX98357. After playback Bunty acknowledges it, the
+gateway closes that turn, and Bunty opens the next socket and listens again.
+Conversation mode ends after 8 s without anyone talking.
+
+While listening, Bunty cocks its head. While thinking, it glances aside. While
+speaking, the tilt servo nods on syllable onsets and the yaw servo sweeps with
+the phrase, both scaled by the loudness actually reaching the speaker.
+
+Voice needs a gateway credential; see provisioning below. Serial logs every
+phase change, the transcript (`[voice] heard:`) and the reply (`[voice] bunty:`).
+
 ## Build and flash
 
 ```sh
 pio run --target upload
 pio device monitor --baud 115200
 ```
+
+Ordinary uploads make no Cloudflare calls and keep whatever gateway credential
+is already in NVS. To give Bunty a gateway credential (first time, or to
+rotate it), install the gateway tooling, authenticate Wrangler, and request a
+provisioned flash:
+
+```sh
+cd ../iot-gateway && npm install && npx wrangler login
+cd ../firmware
+BUNTY_PROVISION_IOT=1 pio run --target upload
+```
+
+That stages a new token for the D1 device `bunty`, embeds it from the ignored
+`.pio/generated/` directory, flashes, and activates the token only after the
+upload succeeds. On first boot the firmware copies the token into NVS and
+mints a new conversation-memory session. The previous token stays valid if
+the build or upload fails.
 
 For a manual factory reset, clear the NVS partition. `--target erase` wipes the
 whole chip and requires a full reflash:

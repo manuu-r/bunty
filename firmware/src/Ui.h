@@ -61,6 +61,7 @@ void drawControls();
 // visible on the device instead of only over a serial cable.
 
 bool settingsControlAt(int16_t x, int16_t y);
+bool voiceControlAt(int16_t x, int16_t y);
 
 struct SettingsStatus {
   bool paired = false;

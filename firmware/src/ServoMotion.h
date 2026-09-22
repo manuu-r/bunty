@@ -13,6 +13,10 @@ class ServoMotion {
  public:
   bool begin(uint8_t pin, uint8_t channel, uint8_t initialAngle);
   void moveTo(float angle);
+  // Chases a target that changes every tick, such as speech loudness. A new
+  // target bends the current path instead of restarting an eased glide from
+  // rest, and moveTo() returns the servo to ordinary glides.
+  void follow(float angle, float maxDegreesPerSecond);
   // Safe from another task; applied on the servo task's next tick.
   void hold();
   bool moving() const { return submitted_ != applied_ || moving_; }
@@ -32,7 +36,9 @@ class ServoMotion {
   static void task(void *context);
   void service(uint32_t now);
   void applyTarget(float angle);
-  struct Command { float angle; uint32_t sequence; };
+  void applyFollow(float angle, float maxDegreesPerSecond);
+  void serviceFollow(uint32_t now);
+  struct Command { float angle; uint32_t sequence; float followRate; };
   QueueHandle_t commands_ = nullptr;
   StaticQueue_t queueControl_ = {};
   uint8_t queueStorage_[sizeof(Command)] = {};
@@ -54,6 +60,7 @@ class ServoMotion {
   static constexpr uint32_t kUpdateIntervalMs = 20;
   static constexpr float kDefaultDegreesPerSecond = 20.0f;
   static constexpr float kMinimumMoveMs = 220.0f;
+  static constexpr float kFollowTimeConstantMs = 60.0f;
 
   void writeAngle(float angle);
 
@@ -67,5 +74,7 @@ class ServoMotion {
   uint32_t lastUpdateMs_ = 0;
   std::atomic<bool> moving_{false};
   std::atomic<bool> hold_{false};
+  bool following_ = false;
+  float followRate_ = 0.0f;
   bool ready_ = false;
 };

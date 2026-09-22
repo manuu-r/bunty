@@ -28,7 +28,14 @@ bool ServoMotion::begin(uint8_t pin, uint8_t channel, uint8_t initialAngle) {
 
 void ServoMotion::moveTo(float angle) {
   if (!ready_ || !isfinite(angle)) return;
-  const Command command{angle, ++submitted_};
+  const Command command{angle, ++submitted_, 0.0f};
+  xQueueOverwrite(commands_, &command);
+}
+
+void ServoMotion::follow(float angle, float maxDegreesPerSecond) {
+  if (!ready_ || !isfinite(angle) || !isfinite(maxDegreesPerSecond)) return;
+  const Command command{angle, ++submitted_,
+                        maxDegreesPerSecond < 1.0f ? 1.0f : maxDegreesPerSecond};
   xQueueOverwrite(commands_, &command);
 }
 
@@ -44,12 +51,17 @@ void ServoMotion::task(void *context) {
       xQueueReset(motion->commands_);
       motion->applied_ = motion->submitted_.load();
       motion->moving_ = false;
+      motion->following_ = false;
       motion->startAngle_ = motion->currentAngle_;
       motion->targetAngle_ = motion->currentAngle_;
     }
     Command target;
     if (xQueueReceive(motion->commands_, &target, 0) == pdTRUE) {
-      motion->applyTarget(target.angle);
+      if (target.followRate > 0.0f) {
+        motion->applyFollow(target.angle, target.followRate);
+      } else {
+        motion->applyTarget(target.angle);
+      }
       motion->applied_ = target.sequence;
     }
     motion->service(millis());
@@ -61,9 +73,38 @@ void ServoMotion::task(void *context) {
   }
 }
 
+void ServoMotion::applyFollow(float angle, float maxDegreesPerSecond) {
+  if (angle < 0.0f) angle = 0.0f;
+  if (angle > 180.0f) angle = 180.0f;
+  if (!following_) lastUpdateMs_ = millis();
+  following_ = true;
+  followRate_ = maxDegreesPerSecond;
+  targetAngle_ = angle;
+  moving_ = true;
+}
+
+void ServoMotion::serviceFollow(uint32_t now) {
+  const float elapsedMs = static_cast<float>(now - lastUpdateMs_);
+  lastUpdateMs_ = now;
+  const float remaining = targetAngle_ - currentAngle_;
+  if (fabsf(remaining) < 0.2f) {
+    moving_ = false;
+    return;
+  }
+  // First-order approach, capped in rate: quick syllables soften into a bob
+  // rather than a twitch, and a large jump cannot yank the linkage.
+  float step = remaining * (1.0f - expf(-elapsedMs / kFollowTimeConstantMs));
+  const float limit = followRate_ * elapsedMs / 1000.0f;
+  if (step > limit) step = limit;
+  if (step < -limit) step = -limit;
+  currentAngle_ += step;
+  writeAngle(currentAngle_);
+}
+
 void ServoMotion::applyTarget(float angle) {
   if (angle < 0.0f) angle = 0.0f;
   if (angle > 180.0f) angle = 180.0f;
+  following_ = false;
 
   const float pending = angle > targetAngle_ ? angle - targetAngle_
                                              : targetAngle_ - angle;
@@ -93,6 +134,10 @@ void ServoMotion::setSpeed(float degreesPerSecond) {
 
 void ServoMotion::service(uint32_t now) {
   if (!ready_ || !moving_ || now - lastUpdateMs_ < kUpdateIntervalMs) return;
+  if (following_) {
+    serviceFollow(now);
+    return;
+  }
   lastUpdateMs_ = now;
 
   float t = moveDurationMs_ == 0

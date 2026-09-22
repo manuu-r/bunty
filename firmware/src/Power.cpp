@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <atomic>
 
 #include "Config.h"
 
@@ -27,6 +28,7 @@ bool txPowerApplied_ = false;
 uint32_t lastBusyAt_ = 0;
 bool idle_ = false;
 bool radioSleeping_ = false;
+std::atomic<bool> radioAwake_{false};
 
 uint32_t usedMilliampSeconds_ = 0;
 uint32_t lastAccountedAt_ = 0;
@@ -38,6 +40,8 @@ uint16_t loadMilliamps(Load load) {
   switch (load) {
     case Load::kTurnServo:
     case Load::kTiltServo: return kServoMilliamps;
+    case Load::kAudio: return kAudioMilliamps;
+    case Load::kDance: return kDanceMilliamps;
     case Load::kCount: break;
   }
   return 0;
@@ -107,7 +111,7 @@ void begin(Preferences &storage) {
 
 bool claim(Load load) {
   if (load == Load::kCount) return false;
-  if (mode_ == Mode::kSaver) return false;
+  if (mode_ == Mode::kSaver && load != Load::kAudio) return false;
   const size_t index = static_cast<size_t>(load);
   const uint16_t headroom = kRailMilliamps - kReserveMilliamps;
 
@@ -158,6 +162,8 @@ void markBusy() {
   setIdle(false);
 }
 
+void setRadioAwake(bool awake) { radioAwake_ = awake; }
+
 void service() {
   const uint32_t now = millis();
   accountFuel(now);
@@ -165,7 +171,7 @@ void service() {
   bool busy = false;
   for (size_t i = 0; i < static_cast<size_t>(Load::kCount); ++i) busy |= claimed_[i];
   setIdle(!busy && now - lastBusyAt_ >= kIdleAfterMs);
-  setRadioSleep(true);
+  setRadioSleep(!radioAwake_);
   if (!txPowerApplied_ && WiFi.status() == WL_CONNECTED) {
     txPowerApplied_ = true;
     WiFi.setTxPower(static_cast<wifi_power_t>(kWifiTxPowerQuarterDbm));
@@ -199,6 +205,12 @@ float servoSpeed(float requestedDegreesPerSecond) {
   return requestedDegreesPerSecond < kConservativeServoDegreesPerSecond
              ? requestedDegreesPerSecond
              : kConservativeServoDegreesPerSecond;
+}
+
+uint8_t volumeCeiling(uint8_t requestedPercent) {
+  if (mode_ == Mode::kNormal) return requestedPercent;
+  return requestedPercent < kConservativeVolumePercent ? requestedPercent
+                                                       : kConservativeVolumePercent;
 }
 
 Mode mode() { return mode_; }

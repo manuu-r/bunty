@@ -1,8 +1,15 @@
 #include "Log.h"
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_netif.h>
+#include <esp_random.h>
+#include <time.h>
 
 #include "Animations.h"
+#include "AudioIo.h"
+#include "Dance.h"
+#include "IotGatewayCredentials.h"
+#include "Voice.h"
 #include "Config.h"
 #include "Ui.h"
 #include "Dashboard.h"
@@ -52,6 +59,22 @@ bool sweepTiltClaimed = false;
 
 wl_status_t lastWifiStatus = WL_NO_SHIELD;
 
+Microphone microphone;
+Voice voice;
+Dance dance;
+
+// Bunty's face owns the screen for the whole conversation.
+bool voiceFaceShown = false;
+Voice::Phase shownPhase = Voice::Phase::Off;
+uint32_t lastFaceFrameAt = 0;
+uint8_t waveform[cfg::voice::kWaveformSamples] = {};
+size_t waveformHead = 0;
+float mouthLevel = 0.0f;
+
+bool clockSyncRequested = false;
+uint32_t nextClockSyncAt = 0;
+bool publicDnsConfigured = false;
+
 // ------------------------------------------------------------- identity ---
 
 void loadIdentity() {
@@ -64,6 +87,92 @@ void loadIdentity() {
   snprintf(identifier, sizeof(identifier), "bunty-%012llx",
            static_cast<unsigned long long>(chipId & 0xFFFFFFFFFFFFULL));
   hardwareId = identifier;
+}
+
+// ---------------------------------------------------------- iot gateway ---
+
+bool isIotGatewayToken(const char *token) {
+  if (strlen(token) != 47 || strncmp(token, "iot_", 4) != 0) return false;
+  for (size_t i = 4; i < 47; ++i) {
+    const char ch = token[i];
+    if (!isalnum(static_cast<unsigned char>(ch)) && ch != '-' && ch != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Scopes the gateway's short-term conversation memory. Minted whenever a new
+// credential is stored, i.e. on every provisioned flash, and kept across
+// power cycles.
+void mintVoiceSession() {
+  char sessionId[17];
+  snprintf(sessionId, sizeof(sessionId), "%08x%08x",
+           static_cast<unsigned>(esp_random()),
+           static_cast<unsigned>(esp_random()));
+  preferences.putString(cfg::nvs::kIotSession, sessionId);
+  logPrintf("[iot-gateway] new conversation session %s\n", sessionId);
+}
+
+// A provisioned build carries a fresh token; copy it into NVS so ordinary
+// uploads afterwards keep working with the stored one.
+void syncIotGatewayCredential() {
+  constexpr char compiledToken[] = IOT_GATEWAY_TOKEN;
+  constexpr char compiledDevice[] = IOT_GATEWAY_DEVICE_ID;
+  if (!isIotGatewayToken(compiledToken)) {
+    Serial.println("[iot-gateway] no credential embedded in this build");
+    return;
+  }
+  if (preferences.getString(cfg::nvs::kIotToken, "") == compiledToken &&
+      preferences.getString(cfg::nvs::kIotDevice, "") == compiledDevice) {
+    return;
+  }
+  const bool saved =
+      preferences.putString(cfg::nvs::kIotToken, compiledToken) > 0 &&
+      preferences.putString(cfg::nvs::kIotDevice, compiledDevice) > 0;
+  Serial.println(saved ? "[iot-gateway] stored flashed credential"
+                       : "[iot-gateway] could not store flashed credential");
+  if (saved) mintVoiceSession();
+}
+
+void startVoice() {
+  char token[48] = {};
+  char session[17] = {};
+  preferences.getString(cfg::nvs::kIotToken, token, sizeof(token));
+  preferences.getString(cfg::nvs::kIotSession, session, sizeof(session));
+  if (isIotGatewayToken(token) && session[0] == '\0') {
+    mintVoiceSession();
+    preferences.getString(cfg::nvs::kIotSession, session, sizeof(session));
+  }
+  voice.begin(&microphone, isIotGatewayToken(token) ? token : "", session);
+}
+
+// TLS certificate validity depends on a real clock; NTP runs asynchronously.
+void serviceClockSync() {
+  if (WiFi.status() != WL_CONNECTED) {
+    publicDnsConfigured = false;
+    return;
+  }
+  if (!publicDnsConfigured) {
+    // Some routers' DNS relays fail intermittently for the gateway host.
+    esp_netif_t *station = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_dns_info_t dns = {};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(1, 1, 1, 1);
+    if (station && esp_netif_set_dns_info(station, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+      esp_netif_dns_info_t backup = {};
+      backup.ip.type = ESP_IPADDR_TYPE_V4;
+      backup.ip.u_addr.ip4.addr = ESP_IP4TOADDR(8, 8, 8, 8);
+      esp_netif_set_dns_info(station, ESP_NETIF_DNS_BACKUP, &backup);
+    }
+    publicDnsConfigured = true;
+  }
+  if (time(nullptr) >= cfg::net::kMinimumTrustedUnixTime) return;
+  if (clockSyncRequested && static_cast<int32_t>(millis() - nextClockSyncAt) < 0) return;
+  configTime(0, 0, "time.cloudflare.com", "time.google.com", "pool.ntp.org");
+  clockSyncRequested = true;
+  nextClockSyncAt = millis() + cfg::net::kClockSyncRetryMs;
+  Serial.println("[time] requesting NTP synchronization for TLS");
 }
 
 // -------------------------------------------------------------- runtime ---
@@ -127,6 +236,7 @@ void forgetPairing() {
 bool servicePageSweep() {
   static bool preferTilt = false;
   if (!cfg::servo::kPageSweep || (!turnServoReady && !tiltServoReady)) return true;
+  if (dance.active()) return true;
 
   const bool moving = (turnServoReady && turnServo.moving()) ||
                       (tiltServoReady && tiltServo.moving());
@@ -292,6 +402,102 @@ bool serviceFace() {
   return false;
 }
 
+// ---------------------------------------------------------------- voice ---
+
+const char *phaseLabel(Voice::Phase phase) {
+  switch (phase) {
+    case Voice::Phase::Connecting: return "CONNECTING";
+    case Voice::Phase::Listening: return "LISTENING";
+    case Voice::Phase::Thinking:
+    case Voice::Phase::Finishing: return "THINKING";
+    case Voice::Phase::Speaking: return "";
+    case Voice::Phase::Off: break;
+  }
+  return "";
+}
+
+void showVoiceFace(uint32_t now) {
+  voiceFaceShown = true;
+  shownPhase = Voice::Phase::Off;
+  waveformHead = 0;
+  mouthLevel = 0.0f;
+  memset(waveform, 0, sizeof(waveform));
+  ui::Guard guard;
+  ui::display().clear(cfg::ui::kBackground);
+  animations->beginSpeaking(now, false);
+  ui::drawTopBar(false);
+  ui::display().present();
+}
+
+void hideVoiceFace() {
+  voiceFaceShown = false;
+  touch::flush();
+  lastInteractionAt = millis();
+  const char *error = voice.lastError();
+  if (*error) {
+    ui::showError(error);
+    delay(1500);
+  }
+  if (displayState == DisplayState::Dashboard) dashboard::render();
+}
+
+// Eyes, a phase label, the microphone level while listening, and a mouth
+// that opens with the reply actually reaching the speaker.
+void serviceVoiceFace(uint32_t now) {
+  const Voice::Phase phase = voice.phase();
+  if (phase != shownPhase) {
+    const bool wasSpeaking = shownPhase == Voice::Phase::Speaking;
+    shownPhase = phase;
+    ui::Guard guard;
+    const char *label = phaseLabel(phase);
+    if (*label) animations->drawWakeIcon(label);
+    else animations->clearWakeIcon();
+    if (wasSpeaking) animations->drawSpeakingMouth(0);
+    if (phase != Voice::Phase::Listening) animations->clearInputWaveform();
+  }
+  {
+    ui::Guard guard;
+    animations->serviceSpeaking(now);
+  }
+  if (now - lastFaceFrameAt < cfg::voice::kFaceFrameMs) return;
+  lastFaceFrameAt = now;
+
+  if (phase == Voice::Phase::Listening) {
+    uint32_t scaled = voice.inputLevel() * 100u / cfg::voice::kWaveformFullScaleRms;
+    waveform[waveformHead] = static_cast<uint8_t>(scaled > 100 ? 100 : scaled);
+    waveformHead = (waveformHead + 1) % cfg::voice::kWaveformSamples;
+    ui::Guard guard;
+    animations->drawInputWaveform(waveform, cfg::voice::kWaveformSamples, waveformHead);
+  } else if (phase == Voice::Phase::Speaking) {
+    const float level = voice.outputLevel();
+    mouthLevel += (level - mouthLevel) * (level > mouthLevel ? 0.6f : 0.3f);
+    float openness = mouthLevel * 120.0f;
+    ui::Guard guard;
+    animations->drawSpeakingMouth(static_cast<uint8_t>(openness > 100.0f ? 100.0f : openness));
+  }
+}
+
+// Returns true while the conversation owns the screen and touch.
+bool serviceVoice() {
+  const uint32_t now = millis();
+  dance.service(voice.phase(), voice.outputLevel(), now);
+  if (!voice.active()) {
+    if (voiceFaceShown) hideVoiceFace();
+    return false;
+  }
+  lastInteractionAt = now;
+  if (displayState != DisplayState::Dashboard || overlay != Overlay::kNone) {
+    overlay = Overlay::kNone;
+    displayState = DisplayState::Dashboard;
+    ui::fadeBacklightTo(255);
+  }
+  if (!voiceFaceShown) showVoiceFace(now);
+  // Anywhere on the face is the mic button: end, or interrupt the reply.
+  if (touch::poll().kind == touch::Event::Kind::kTap) voice.toggle();
+  serviceVoiceFace(now);
+  return true;
+}
+
 void serviceRuntime() {
   if (greetingEyesShown && static_cast<int32_t>(millis() - greetingEndsAt) < 0) return;
   if (greetingEyesShown) {
@@ -301,7 +507,12 @@ void serviceRuntime() {
     dashboard::render();
   }
 
-  if (displayState == DisplayState::Dashboard) {
+  serviceClockSync();
+  const bool conversing = serviceVoice();
+
+  if (conversing) {
+    // The dashboard keeps syncing behind the face; it just doesn't draw.
+  } else if (displayState == DisplayState::Dashboard) {
     const touch::Event event = touch::poll();
     if (event.kind != touch::Event::Kind::kNone) {
       lastInteractionAt = millis();
@@ -309,6 +520,16 @@ void serviceRuntime() {
     }
     if (overlay != Overlay::kNone) {
       serviceSettingsTouch(event);
+      return;
+    }
+    if (event.kind == touch::Event::Kind::kTap && ui::voiceControlAt(event.x, event.y)) {
+      if (voice.ready()) {
+        voice.toggle();
+      } else {
+        ui::showError("Voice not set up");
+        delay(1200);
+        dashboard::render();
+      }
       return;
     }
     if (event.kind == touch::Event::Kind::kLongPress ||
@@ -321,7 +542,7 @@ void serviceRuntime() {
     return;
   }
 
-  if (displayState == DisplayState::Dashboard && overlay == Overlay::kNone &&
+  if (!conversing && displayState == DisplayState::Dashboard && overlay == Overlay::kNone &&
       millis() - lastInteractionAt >= cfg::dashboard::kIdleSleepMs) {
     enterSleep();
   }
@@ -331,7 +552,7 @@ void serviceRuntime() {
     lastWifiStatus = wifiStatus;
     dashboard::forgetDiscovery();
     dashboard::refreshSoon();
-    if (displayState == DisplayState::Dashboard) {
+    if (displayState == DisplayState::Dashboard && !conversing) {
       dashboard::render();
     } else {
       ui::Guard guard;
@@ -339,11 +560,12 @@ void serviceRuntime() {
     }
   }
 
-  if (dashboard::serviceFetch() && displayState == DisplayState::Dashboard) {
+  if (dashboard::serviceFetch() && displayState == DisplayState::Dashboard && !conversing) {
     dashboard::render();
   }
 
-  if (displayState == DisplayState::Dashboard && dashboard::pageDue()) {
+  if (displayState == DisplayState::Dashboard && !conversing && !dance.active() &&
+      dashboard::pageDue()) {
     // The page waits for the glance to finish; render() then restarts the page
     // timer, so the next sweep is a full interval away.
     if (servicePageSweep()) {
@@ -424,6 +646,8 @@ void setupServos() {
                          tiltHome, "tilt");
   if (stored) calibration.end();
   if (cfg::servo::kBootDemo) runServoDemo();
+  dance.attach(turnServoReady ? &turnServo : nullptr, turnHome,
+               tiltServoReady ? &tiltServo : nullptr, tiltHome);
 }
 
 
@@ -444,13 +668,15 @@ void setup() {
 
   setupServos();
 
-  // No audio output: keep the amplifier shut down.
+  // The amp idles shut down; the speaker wakes it only for a reply.
   pinMode(cfg::pin::kAmpShutdown, OUTPUT);
   digitalWrite(cfg::pin::kAmpShutdown, LOW);
 
   preferences.begin(cfg::nvs::kNamespace, false);
   power::begin(preferences);
   loadIdentity();
+  syncIotGatewayCredential();
+  if (microphone.begin()) startVoice();
   dashboard::begin(preferences, hardwareId);
 
   const bool touchReady = touch::begin();

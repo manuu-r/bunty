@@ -2,6 +2,7 @@
 
 #include <driver/i2s.h>
 #include <stdint.h>
+#include <time.h>
 
 // Every board wiring detail, protocol constant, and behavioural tunable for
 // Bunty. Nothing here allocates or depends on the rest of the firmware, so a
@@ -32,7 +33,7 @@ constexpr int kTurnServo = 9;   // SG90, head yaw
 constexpr int kTiltServo = 14;  // SG90, head pitch
 
 // MAX98357 amplifier. UART0's pads are free for it: Serial runs over native
-// USB. Nothing drives audio yet; SD is held low so the amp stays shut down.
+// USB. SD is held low, shutting the amp down, except while Bunty is speaking.
 constexpr int kAmpShutdown = 2;
 constexpr int kAmpBclk = 15;
 constexpr int kAmpLrc = 43;
@@ -140,13 +141,21 @@ constexpr uint16_t kReserveMilliamps = 350;
 constexpr uint16_t kBaseMilliamps = 300;      // module, panel, radio average
 constexpr uint16_t kBacklightMilliamps = 80;  // at full duty
 constexpr uint16_t kServoMilliamps = 750;     // SG90 under load
+constexpr uint16_t kAudioMilliamps = 300;     // MAX98357 into 4 ohm at speech volume
+// Both servos while dancing to speech: small arcs at a capped glide rate, so
+// neither ever approaches the stall current kServoMilliamps budgets for.
+constexpr uint16_t kDanceMilliamps = 440;
 constexpr uint16_t kBatteryMilliampHours = 1500;
 
 // The policy falls out of this arithmetic rather than out of special cases:
-// exactly one servo runs at a time.
+// exactly one full-travel servo runs at a time, and the dance fits beside audio.
 static_assert(kBaseMilliamps + kBacklightMilliamps + kServoMilliamps <=
                   kRailMilliamps - kReserveMilliamps,
               "one servo must fit inside the rail budget");
+static_assert(kBaseMilliamps + kBacklightMilliamps + kAudioMilliamps +
+                      kDanceMilliamps <=
+                  kRailMilliamps - kReserveMilliamps,
+              "the speech dance must fit beside the speaker");
 static_assert(kBaseMilliamps + kBacklightMilliamps + 2 * kServoMilliamps >
                   kRailMilliamps - kReserveMilliamps,
               "two servos at once must not fit inside the rail budget");
@@ -161,6 +170,7 @@ constexpr uint8_t kActiveCpuMhz = 240;
 
 constexpr uint32_t kConservativeMs = 10 * 60 * 1000;
 constexpr uint8_t kConservativeBacklight = 160;
+constexpr uint8_t kConservativeVolumePercent = 45;
 constexpr float kConservativeServoDegreesPerSecond = 20.0f;
 
 constexpr uint8_t kSaverBacklight = 60;
@@ -230,16 +240,98 @@ constexpr size_t kEventRowsPerPage = 5;
 constexpr size_t kTodoRowsPerPage = 6;
 }  // namespace dashboard
 
+// ----------------------------------------------------------------- audio ---
+
+namespace audio {
+// The gateway's only format in both directions: signed 16-bit mono PCM.
+constexpr uint32_t kSampleRate = 16000;
+
+// INMP441-style mics put 24 bits left-aligned in a 32-bit slot. Shifting by
+// 13 rather than 16 is 18 dB of gain, the level the gateway transcribed well.
+constexpr int kMicShift = 13;
+// A slot is treated as unwired once its energy falls below 1/8 of the other's;
+// otherwise the two mics are averaged, which lowers uncorrelated noise.
+constexpr uint32_t kMicSlotRatio = 8;
+constexpr size_t kCaptureRingBytes = 320000;  // 10 s: covers TLS + Flux setup
+
+constexpr uint8_t kVolumePercent = 70;
+constexpr int kSpeakerDmaBuffers = 4;
+constexpr int kSpeakerDmaFrames = 240;
+constexpr uint32_t kSpeakerDrainMs =
+    kSpeakerDmaBuffers * kSpeakerDmaFrames * 1000 / kSampleRate + 30;
+// Aura streams sentences faster than real time. 1 MB is ~32 s of reply.
+constexpr size_t kPlaybackRingBytes = 1024 * 1024;
+// Jitter cushion before the first sample, and again after any underrun.
+constexpr size_t kPrebufferBytes = kSampleRate * 2 * 120 / 1000;
+// Output RMS that reads as "fully open" for the mouth and the dance.
+constexpr float kLevelFullScale = 5000.0f;
+}  // namespace audio
+
+// ----------------------------------------------------------------- voice ---
+
+namespace voice {
+#ifndef IOT_GATEWAY_HOST
+#define IOT_GATEWAY_HOST "bunty.underdogthinkers.com"
+#endif
+constexpr char kGatewayHost[] = IOT_GATEWAY_HOST;
+constexpr char kLivePath[] = "/v1/live";
+
+// Flux's recommended chunk: 80 ms of 16 kHz linear16.
+constexpr size_t kUploadFrameBytes = 2560;
+
+// Conversation mode ends after this long without anyone talking. Gateway
+// speech events are authoritative; local energy only bridges the few hundred
+// ms Flux needs to report a word that starts right at the deadline.
+constexpr uint32_t kSilenceExitMs = 8000;
+constexpr uint32_t kLocalSpeechGraceMs = 3000;
+constexpr uint32_t kLocalSpeechHoldMs = 600;
+
+constexpr uint32_t kConnectTimeoutMs = 12000;
+constexpr uint32_t kReplyTimeoutMs = 30000;
+constexpr uint32_t kCompleteTimeoutMs = 5000;
+constexpr uint8_t kMaxConsecutiveFailures = 3;
+constexpr uint32_t kRetryDelayMs = 800;
+
+constexpr int kSocketBufferBytes = 4096;
+constexpr int kSocketTaskStack = 6144;
+constexpr size_t kControlBytes = 8192;
+
+constexpr uint32_t kFaceFrameMs = 45;
+constexpr size_t kWaveformSamples = 58;
+constexpr uint32_t kWaveformFullScaleRms = 1500;
+}  // namespace voice
+
+// ----------------------------------------------------------------- dance ---
+
+// Bunty's head while it talks: tilt nods on syllables, yaw sweeps with phrases.
+namespace dance {
+constexpr float kNodDegrees = 14.0f;      // tilt kick on a syllable onset
+constexpr float kLiftDegrees = 8.0f;      // tilt raised by sustained loudness
+constexpr float kSweepDegrees = 26.0f;    // yaw half-arc at full loudness
+constexpr float kSweepHz = 0.45f;         // yaw sweep rate at full loudness
+constexpr float kAccentDegrees = 6.0f;    // yaw flick on a strong onset
+constexpr float kMaxDegreesPerSecond = 160.0f;
+constexpr float kListenTiltDegrees = 7.0f;   // curious head cock while listening
+constexpr float kThinkTurnDegrees = -12.0f;  // glance aside while thinking
+constexpr float kThinkTiltDegrees = 6.0f;
+constexpr float kPoseDegreesPerSecond = 40.0f;
+constexpr uint32_t kTickMs = 20;
+}  // namespace dance
+
 // --------------------------------------------------------------- network ---
 
 namespace net {
 constexpr uint32_t kMdnsQueryTimeoutMs = 3000;
+// TLS certificate validity depends on a real clock.
+constexpr time_t kMinimumTrustedUnixTime = 1704067200;  // 2024-01-01 UTC
+constexpr uint32_t kClockSyncRetryMs = 30000;
 }  // namespace net
 
 // ------------------------------------------------------- persisted state ---
 
-// NVS namespace and keys. Unpairing clears kGaugeKeys only; the Bluetooth
-// address is minted once and survives re-pairing, so this accessory keeps one identity for its whole life.
+// NVS namespace and keys. Unpairing clears kGaugeKeys only; the IoT gateway
+// credential and the Bluetooth address are provisioned once and survive
+// re-pairing, so this accessory keeps one identity for its whole life.
 namespace nvs {
 constexpr char kNamespace[] = "bunty";
 
@@ -259,6 +351,10 @@ constexpr char kBleAddress[] = "ble_addr";
 
 constexpr char kBrownouts[] = "brownouts";
 constexpr char kFuelUsed[] = "fuel_mas";
+
+constexpr char kIotToken[] = "iot_token";
+constexpr char kIotDevice[] = "iot_device";
+constexpr char kIotSession[] = "iot_session";
 
 constexpr const char *kGaugeKeys[] = {
     kApiVersion, kDeviceId, kServerId,     kToken,     kServiceType,

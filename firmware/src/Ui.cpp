@@ -390,10 +390,11 @@ void showSyncing(bool failed) {
 }
 
 bool settingsControlAt(int16_t x, int16_t y) { return x >= 4 && x < 60 && y >= 270 && y < 320; }
+bool voiceControlAt(int16_t x, int16_t y) { return x >= 180 && x < 236 && y >= 270 && y < 320; }
 
 void drawControls() {
   panel.fillRect(0, 270, kScreenWidth, 50, kBackground);
-  panel.fillRoundRect(4, 272, 56, 46, 10, kSurface);
+  for (int x : {4, 180}) panel.fillRoundRect(x, 272, 56, 46, 10, kSurface);
 
   // Three sliders. A gear at this size came out as two concentric circles,
   // which reads as a map pin rather than settings.
@@ -402,6 +403,13 @@ void drawControls() {
     panel.drawFastHLine(18, y, 28, kText);
     panel.fillCircle(row == 1 ? 38 : 26, y, 3, kText);
   }
+
+  // Microphone: capsule, arc, stem, base.
+  panel.fillRoundRect(204, 280, 9, 18, 4, kText);
+  panel.drawCircleHelper(208, 294, 10, 0x8, kText);
+  panel.drawCircleHelper(209, 294, 10, 0x4, kText);
+  panel.drawFastVLine(208, 304, 6, kText);
+  panel.drawFastHLine(202, 310, 13, kText);
 }
 
 }  // namespace ui

@@ -17,6 +17,37 @@ constexpr int16_t kSpeakingTop = 97;
 constexpr int16_t kSpeakingWidth = 196;
 constexpr int16_t kSpeakingHeight = 142;
 constexpr uint32_t kSpeakingFrameTimeMs = 105;
+// The eyes end at y=239; the mouth band starts below that and stays clear of
+// the 320 px bottom edge at full opening.
+constexpr int16_t kMouthCenterX = 120;
+constexpr int16_t kMouthCenterY = 274;
+constexpr int16_t kMouthHalfWidth = 38;
+constexpr int16_t kMouthMinGap = 2;
+constexpr int16_t kMouthMaxGap = 20;
+constexpr int16_t kMouthStroke = 3;
+constexpr int16_t kMouthMargin = 4;
+constexpr int16_t kMouthBandTop =
+    kMouthCenterY - kMouthMaxGap - kMouthStroke - kMouthMargin;
+constexpr int16_t kMouthBandHeight =
+    (kMouthMaxGap + kMouthStroke + kMouthMargin) * 2;
+constexpr int16_t kMouthBandLeft = kMouthCenterX - kMouthHalfWidth - kMouthMargin;
+constexpr int16_t kMouthBandWidth = (kMouthHalfWidth + kMouthMargin) * 2;
+constexpr int16_t kMouthSegments = 16;
+
+// Listening glyph: sits in the gap between the 32 px status bar and the eyes,
+// which start at y=97.
+constexpr int16_t kWakeBandTop = 40;
+constexpr int16_t kWakeBandHeight = 54;
+constexpr int16_t kWakeCenterX = 120;
+constexpr int16_t kWakeCenterY = 58;
+constexpr int16_t kWakeLabelTop = 78;
+
+// Scrolling capture level history along the bottom edge.
+constexpr int16_t kWaveBandTop = 288;
+constexpr int16_t kWaveBandHeight = 30;
+constexpr int16_t kWaveMidline = kWaveBandTop + kWaveBandHeight / 2;
+constexpr int16_t kWaveBarWidth = 3;
+constexpr int16_t kWaveBarGap = 1;
 constexpr uint32_t kSleepFrameTimeMs = 650;
 constexpr uint32_t kWakeFrameTimeMs = 110;
 
@@ -248,4 +279,139 @@ void BuntyAnimations::drawWakeFrame() {
   drawRoboEye(display_, kRightEyeX, kEyeY, rightHeight <= 20 ? 58 : 48,
               rightHeight, false, rightShape);
   display_.present(0, kContentTop, kScreenWidth, kContentHeight);
+}
+
+void BuntyAnimations::drawSpeakingMouth(uint8_t openness) {
+  if (openness > 100) openness = 100;
+
+  // Repaint only the mouth band so the eyes above keep their own frame timing.
+  display_.fillRect(kMouthBandLeft, kMouthBandTop, kMouthBandWidth,
+                    kMouthBandHeight, kBackground);
+
+  const int16_t gap =
+      kMouthMinGap +
+      static_cast<int16_t>((kMouthMaxGap - kMouthMinGap) * openness / 100);
+
+  // Two parabolic arcs meeting at the corners: a lens that widens with
+  // loudness. Drawn as short stroked segments to stay in the same geometric
+  // line vocabulary as the eyes rather than becoming a filled blob.
+  int16_t previousX = kMouthCenterX - kMouthHalfWidth;
+  int16_t previousUpper = kMouthCenterY;
+  int16_t previousLower = kMouthCenterY;
+  for (int16_t segment = 1; segment <= kMouthSegments; ++segment) {
+    const int16_t x = kMouthCenterX - kMouthHalfWidth +
+                      (2 * kMouthHalfWidth * segment) / kMouthSegments;
+    // Normalised to -100..100 across the mouth; the parabola is 0 at the
+    // corners and full height at the centre.
+    const int32_t offsetFromCentre =
+        (static_cast<int32_t>(x - kMouthCenterX) * 100) / kMouthHalfWidth;
+    const int32_t bow =
+        (100 * 100 - offsetFromCentre * offsetFromCentre) / 100;
+    const int16_t spread = static_cast<int16_t>(gap * bow / 100);
+    const int16_t upper = kMouthCenterY - spread;
+    const int16_t lower = kMouthCenterY + spread;
+    for (int16_t stroke = 0; stroke < kMouthStroke; ++stroke) {
+      display_.drawLine(previousX, previousUpper + stroke, x, upper + stroke,
+                        kEyeCyan);
+      display_.drawLine(previousX, previousLower - stroke, x, lower - stroke,
+                        kEyeCyan);
+    }
+    previousX = x;
+    previousUpper = upper;
+    previousLower = lower;
+  }
+
+  display_.present(kMouthBandLeft, kMouthBandTop, kMouthBandWidth,
+                   kMouthBandHeight);
+}
+
+void BuntyAnimations::drawWakeIcon(const char *label) {
+  display_.fillRect(0, kWakeBandTop, kScreenWidth, kWakeBandHeight,
+                    kBackground);
+
+  // A microphone capsule with a cradle, stem, and base, in the same chunky
+  // cyan vocabulary as the eyes.
+  constexpr int16_t kCapsuleWidth = 12;
+  constexpr int16_t kCapsuleHeight = 18;
+  display_.fillRoundRect(kWakeCenterX - kCapsuleWidth / 2,
+                         kWakeCenterY - kCapsuleHeight / 2 - 4, kCapsuleWidth,
+                         kCapsuleHeight, kCapsuleWidth / 2, kEyeCyan);
+  for (int16_t thickness = 0; thickness < 2; ++thickness) {
+    display_.drawCircle(kWakeCenterX, kWakeCenterY - 5 + thickness, 10,
+                        kEyeCyan);
+  }
+  // Mask the upper half of the cradle so it reads as a cup, not a ring.
+  display_.fillRect(kWakeCenterX - 11, kWakeCenterY - 16, 22, 11, kBackground);
+  display_.fillRect(kWakeCenterX - 1, kWakeCenterY + 5, 3, 5, kEyeCyan);
+  display_.fillRect(kWakeCenterX - 7, kWakeCenterY + 10, 15, 3, kEyeCyan);
+
+  // Sound arcs either side, dimmer so the capsule stays the focal point.
+  for (int16_t side = -1; side <= 1; side += 2) {
+    for (int16_t ring = 1; ring <= 2; ++ring) {
+      const int16_t radius = 7 + ring * 6;
+      const int16_t x = kWakeCenterX + side * (kCapsuleWidth / 2 + 5);
+      for (int16_t dy = -radius / 2; dy <= radius / 2; ++dy) {
+        const int16_t dx = static_cast<int16_t>(
+            sqrtf(static_cast<float>(radius * radius - dy * dy)) / 2.0f);
+        display_.drawPixel(x + side * dx, kWakeCenterY - 5 + dy, kEyeGlow);
+      }
+    }
+  }
+
+  // The phase label under the glyph, centred the same way the dashboard
+  // centres its own copy.
+  display_.setFont(BuntyFonts::kBody);
+  display_.setTextSize(1);
+  display_.setTextColor(kEyeCyan);
+  display_.setTextWrap(false);
+  int16_t x1 = 0;
+  int16_t y1 = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  display_.getTextBounds(label, 0, 0, &x1, &y1, &width, &height);
+  display_.setCursor((kScreenWidth - static_cast<int16_t>(width)) / 2 - x1,
+                     kWakeLabelTop - y1);
+  display_.print(label);
+
+  display_.present(0, kWakeBandTop, kScreenWidth, kWakeBandHeight);
+}
+
+void BuntyAnimations::clearWakeIcon() {
+  display_.fillRect(0, kWakeBandTop, kScreenWidth, kWakeBandHeight,
+                    kBackground);
+  display_.present(0, kWakeBandTop, kScreenWidth, kWakeBandHeight);
+}
+
+void BuntyAnimations::drawInputWaveform(const uint8_t *levels, size_t count,
+                                        size_t head) {
+  if (!levels || count == 0) return;
+  display_.fillRect(0, kWaveBandTop, kScreenWidth, kWaveBandHeight,
+                    kBackground);
+
+  // A faint centre line so a silent stretch still reads as "capturing".
+  display_.drawFastHLine(4, kWaveMidline, kScreenWidth - 8, kEyeGlow);
+
+  const int16_t stride = kWaveBarWidth + kWaveBarGap;
+  const int16_t maxBars = (kScreenWidth - 8) / stride;
+  const int16_t bars =
+      static_cast<int16_t>(count) < maxBars ? static_cast<int16_t>(count) : maxBars;
+  const int16_t half = kWaveBandHeight / 2 - 2;
+
+  for (int16_t i = 0; i < bars; ++i) {
+    // Oldest bar leftmost: walk back from the newest sample.
+    const size_t index = (head + count - static_cast<size_t>(bars - i)) % count;
+    int16_t amplitude = static_cast<int16_t>(levels[index]) * half / 100;
+    if (amplitude < 1) amplitude = 1;
+    const int16_t x = 4 + i * stride;
+    display_.fillRect(x, kWaveMidline - amplitude, kWaveBarWidth,
+                      amplitude * 2, kEyeCyan);
+  }
+
+  display_.present(0, kWaveBandTop, kScreenWidth, kWaveBandHeight);
+}
+
+void BuntyAnimations::clearInputWaveform() {
+  display_.fillRect(0, kWaveBandTop, kScreenWidth, kWaveBandHeight,
+                    kBackground);
+  display_.present(0, kWaveBandTop, kScreenWidth, kWaveBandHeight);
 }
