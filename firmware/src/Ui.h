@@ -54,8 +54,32 @@ bool pairingVisible();
 void showNumericComparison(uint32_t pin);
 void showPairingConfirmed();
 void showError(const char *message);
-void showUnpairPrompt();
 void showUnpaired();
-void showSyncing();
+void showSyncing(bool failed = false);
+void drawControls();
+// Draws where the panel thinks the finger landed, so a mirrored axis is
+// visible on the device instead of only over a serial cable.
+void drawTouchMarker(int16_t x, int16_t y);
+
+bool settingsControlAt(int16_t x, int16_t y);
+bool voiceControlAt(int16_t x, int16_t y);
+
+struct SettingsStatus {
+  bool paired = false;
+  bool online = false;
+  const char *network = "";
+  const char *server = "";
+  int32_t signal = 0;
+};
+
+enum class SettingsRow : uint8_t { kNone, kPair, kDisconnect, kUnpair, kClose };
+
+void showSettings(const SettingsStatus &status);
+SettingsRow settingsRowAt(int16_t x, int16_t y);
+
+// Two large buttons; settingsRowAt is not used for these.
+void showConfirm(const char *title, const char *detail);
+bool confirmAcceptedAt(int16_t x, int16_t y);
+bool confirmRejectedAt(int16_t x, int16_t y);
 
 }  // namespace ui

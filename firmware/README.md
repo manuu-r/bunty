@@ -4,7 +4,7 @@ Bunty is the ESP32-S3 reference implementation of the vendor-neutral
 [Gauge Accessory Protocol](https://github.com/manuu-r/homebrew-tap/blob/main/docs/accessory-protocol.md). It pairs using
 standard Bluetooth LE Secure Connections, joins Wi-Fi, fetches the Gauge
 dashboard, and retains the last valid snapshot for offline display. Flow32,
-eyes, audio, taps, sleep, and the optional IoT Gateway belong to Bunty rather
+eyes, audio, touch, sleep, and the optional IoT Gateway belong to Bunty rather
 than the protocol.
 
 ## Layout
@@ -20,8 +20,8 @@ threshold, so a new enclosure or panel revision is a change to that one file.
 | `Ui.*` | The panel, framebuffer, render mutex, backlight, static screens |
 | `Pairing.*` | BLE Secure Connections commissioning |
 | `Dashboard.*` | Bonjour discovery, the authenticated pull, the NVS snapshot, pages |
-| `TapGestures.*` | Raw taps to intents: arm voice, wake, unpair |
-| `TapInput.*` | The microphone: tap detection and the shared capture ring |
+| `Touch.*` | CST816D touchscreen, presses and holds |
+| `MicrophoneInput.*` | Stereo microphones, direction samples and voice capture ring |
 | `Audio.*` | `Speaker`, the shared `Mp3Stream`, and the boot greeting |
 | `Voice.*` | Local VAD, the turn-scoped gateway socket, reply playback |
 | `Animations.*` | Eye, mouth, and waveform frames |
@@ -37,14 +37,16 @@ threshold, so a new enclosure or panel revision is a change to that one file.
    BUNTY**.
 2. Click **Pair Accessory…** in the Mac app.
 3. macOS and Bunty show the same six-digit numeric-comparison value.
-4. Confirm on the Mac, then tap Bunty once. Two taps on Bunty reject pairing.
+4. Confirm on the Mac, then press **Yes** on the screen. **No** rejects pairing.
 5. Gauge sends Wi-Fi and its per-device dashboard credential over the
    MITM-protected link.
 6. Bunty joins Wi-Fi, says hello, and begins showing Gauge data.
 
-The link is encrypted and authenticated but never bonded. Commissioning is one
-act with one purpose, and everything afterwards runs over the LAN, so no link
-key is stored on either side and macOS is left with nothing to remember.
+The link is encrypted and authenticated with numeric comparison, and Bunty
+bonds for that session. macOS will not finish the encrypted read without the
+bond. Gauge forgets its copy of the link key before the next attempt, and
+Bunty clears its own before advertising again, so the number is compared
+every time.
 
 Bunty's static random Bluetooth address is minted once and kept for the life of
 the device, including across unpairing. Rotating it per attempt is what made
@@ -54,32 +56,22 @@ Upgrading from a bonding build: remove every leftover `Bunty-*` entry under
 System Settings › Bluetooth once after flashing. Those entries hold link keys
 this firmware no longer has, and macOS will keep trying to use them.
 
-## Tap controls
+## Touch controls
 
-The MEMS microphone is sampled continuously on `I2S_NUM_1`, independently of
-network requests and screen rendering. The adaptive detector logs each accepted
-impulse and its current noise floor over serial.
+The CST816D screen uses I2C address 0x15, SDA GPIO48, SCL GPIO47 and IRQ GPIO46.
+Touch initializes independently of the microphones. Missing touch hardware is
+reported on UART and prevents local pairing confirmation.
 
-- During numeric comparison: one tap confirms, two taps reject.
-- While viewing the dashboard: one firm tap wakes voice for a short
-  conversation window (Bunty shows its face and listens); each reply extends
-  the window and it lapses after about 25 seconds of silence.
-- While viewing the dashboard: three **firm, evenly spaced** taps request
-  unpairing. Soft impulses, fast echoes, and irregular timing are ignored.
-- On the unpair screen: pause for one second, then make one more firm tap to
-  confirm. Waiting six seconds cancels.
-- After two minutes without interaction, the stats give way to Bunty's dimmed
-  sleeping emotion at roughly 3% backlight brightness. One firm tap restores
-  full brightness, plays the wake emotion, and returns to the latest dashboard
-  page.
+- Pairing: compare the numbers, then press the on-screen Yes or No button.
+- Dashboard and connection screen: touch the Settings gear at bottom-left or the Voice microphone at bottom-right. Both have 56 x 50 pixel touch areas. Touching elsewhere does not arm voice or open settings.
+- Settings: view connection status, disconnect, or unpair with explicit Yes/No confirmation.
+- Sleeping: touch the screen to wake. That interaction does not also start voice.
+- Knocks, microphone impulses, double knocks and unpair rhythms have no controls.
 
-Confirmed unpairing asks an available Gauge Mac to revoke the device token,
-then clears its local Gauge server identity, bearer token, Wi-Fi credentials,
-and cached dashboard. It preserves unrelated device settings such as the
-firmware-provisioned voice gateway credential and the Bluetooth address, so a
-re-paired Bunty is recognisably the same accessory. Tap sensitivity and debounce
-constants live in `src/Config.h` and should be calibrated on the assembled
-enclosure.
+Microphones remain available for voice and sound direction; their samples never
+approve Bluetooth pairing or erase credentials. Unpairing preserves unrelated
+settings and the stable Bluetooth address. UART logs report touch detection,
+BLE connection, confirmation decisions and authentication results.
 
 ## Dashboard and offline behavior
 
@@ -122,13 +114,13 @@ untouched:
 
 ```sh
 cd ../firmware
-pio run -e bunty --target upload
+pio run --target upload
 ```
 
 When the IoT Gateway is live, request a provisioned flash explicitly:
 
 ```sh
-BUNTY_PROVISION_IOT=1 pio run -e bunty --target upload
+BUNTY_PROVISION_IOT=1 pio run --target upload
 ```
 
 Only the provisioned form:
@@ -146,20 +138,8 @@ activation before the next flash, and also prints a manual recovery command.
 Normal non-upload builds are also offline:
 
 ```sh
-pio run -e bunty
+pio run
 pio device monitor --baud 115200
-```
-
-### Board variants
-
-| Env | Board | Notes |
-| --- | --- | --- |
-| `bunty` | Original carrier board | Default. |
-| `bunty-no-psram` | Carrier board, no PSRAM module | Monochrome display, no cloud voice; pairing, dashboard, taps, greeting and servo persist. |
-| `bunty-waveshare` | Waveshare ESP32-S3-Touch-LCD-2 (2.0", 240x320) | Same ESP32-S3R8 module and octal PSRAM, so voice, UI, pairing and dashboards are unchanged. The display wiring differs and the MAX98357 LRC moves to GPIO18 (GPIO5 is not broken out); every other servo, amplifier and microphone pin matches the carrier board. Serial runs over the board's native USB port, not a UART bridge. Provisioning flags (`BUNTY_PROVISION_IOT=1`) work the same. |
-
-```sh
-pio run -e bunty-waveshare --target upload
 ```
 
 At boot, Bunty copies the compiled credential into its `bunty` NVS namespace
@@ -256,10 +236,8 @@ Flow32's anti-aliased rounded shapes; sleep adds a small drifting `ZZZ`.
 Dashboard pages remain visible for 11 seconds before rotating.
 
 See [MEMORY_AUDIT.md](MEMORY_AUDIT.md) for placement changes, build measurements,
-task/core ownership, and the hardware verification checklist. Modules without
-PSRAM fall back to a monochrome framebuffer and a 4 KB dashboard response limit
-(the `bunty-no-psram` env; see Board variants). Cloud voice requires PSRAM for
-its existing capture/playback buffering. Conversation history lives at the
+task/core ownership, and the hardware verification checklist. Cloud voice requires PSRAM for its
+existing capture/playback buffering. Conversation history lives at the
 gateway.
 
 Host checks: `sh tests/host/run.sh` (run a firmware build first to install the
@@ -272,60 +250,45 @@ their attribution and OFL-1.1 terms are in `FONT_LICENSES.txt`.
 
 ## Hardware map
 
-On the original carrier board the SmartElex 2-inch 240x320 IPS panel uses its
-ST7789P3 controller in hardware-SPI mode. Connect the module's `EN` pin to
-`TFT_BL`. The Waveshare variant is below.
+The on-board ST7789T3 (240x320) sits on the shared LCD/SD SPI bus and has no
+reset line, so the driver resets it in software. The microphones, amplifier and
+servos are wired to the headers; GPIO4 is the only pin left free.
 
 | Function | GPIO |
 | --- | ---: |
-| TFT CS | 10 |
-| TFT DC | 9 |
-| TFT RST | 14 |
-| TFT EN / backlight | 21 |
-| TFT MOSI / SDA | 11 |
-| TFT SCLK / SCL | 12 |
-| Turn / pan servo signal | 8 |
-| MAX98357 SD | 13 |
-| MAX98357 BCLK | 4 |
-| MAX98357 LRC | 5 |
-| MAX98357 DIN | 6 |
-| MEMS mic BCLK | 15 |
-| MEMS mic WS | 16 |
-| MEMS mic DATA | 17 |
-
-### Waveshare ESP32-S3-Touch-LCD-2 (`-e bunty-waveshare`)
-
-The display pins change, and the MAX98357 LRC moves from GPIO5 (not broken out
-on this board) to GPIO18. Every other servo, amplifier and microphone pin above
-is unchanged. The on-board ST7789T3 (also 240x320) sits on the board's shared
-LCD/SD SPI bus and has no dedicated reset line, so `TFT RST` is `-1` and the
-driver issues a software reset. The board has no microphone or amplifier of its
-own: the same external MEMS mic and MAX98357 are wired to the pins above,
-sharing the camera FPC header, so this build gives up the camera.
-
-| Function | GPIO |
-| --- | ---: |
-| TFT CS | 45 |
-| TFT DC | 42 |
-| TFT RST | — (software reset) |
+| TFT CS / DC / RST | 45 / 42 / — |
 | TFT backlight | 1 |
-| TFT MOSI / SDA | 38 |
-| TFT SCLK / SCL | 39 |
-| MAX98357 LRC | 18 |
+| TFT MOSI / SCLK | 38 / 39 |
+| Touch + IMU SDA / SCL / INT | 48 / 47 / 46 |
+| Turn servo (SG90, yaw) | 9 |
+| Tilt servo (MG90S, pitch) | 14 |
+| MAX98357 SD / BCLK / LRC / DIN | 2 / 15 / 43 / 44 |
+| MEMS mic SCK / WS / SD | 11 / 12 / 13 |
+
+Both microphones share one clock pair and one data line, with their L/R selects
+strapped opposite ways, so each lands on its own half of the I2S frame. One half
+feeds tap detection, VAD and the gateway; the pair together give the bearing
+Bunty turns towards. Measure the centre-to-centre spacing and set
+`cfg::mic::kSpacingMm`.
 
 The display, amplifier, microphone tap detector, voice, BLE pairing, Wi-Fi
 runtime, dashboard client, and turn servo are active. There is no wake word:
 voice is armed by a double tap. OTA is not implemented.
 
-The servo on GPIO 8 homes at 100 degrees and sweeps 40 degrees to each side
+The yaw servo homes at 100 degrees and sweeps 40 degrees to each side
 before every dashboard page change, driven by the non-blocking eased-glide
 `ServoMotion` on a core-1 task, with commands passed through a fixed queue.
 LEDC generates 50 Hz, 14-bit hardware PWM independently of these tasks.
 Calibration is stored in NVS namespace `bunty-motion`: `turn-home`, `turn-min`,
 `turn-max`, `turn-speed` (and equivalent `tilt-*` keys when tilt is enabled).
 Absent keys receive the existing defaults: 100°, 1000–2000 µs, 30°/s.
-Tilt on GPIO 7 remains disabled until its existing wiring issue is resolved.
 `cfg::servo::kEnabled` parks it. Power it from a suitable 5 V supply rather than
 the ESP32's 3.3 V rail and tie the servo ground to ESP32 ground. Note that a
 servo mounted near the microphone injects noise into both the tap detector and
 the voice VAD.
+
+### Wi-Fi and Gauge discovery
+
+Bunty requires 2.4 GHz Wi-Fi. A `NO_AP_FOUND` join failure is reported to Gauge with network-name, band, and range guidance; authentication failures get a separate password/security message.
+
+New Gauge commissioning documents include `server_ipv4`, stored as an optional same-subnet address hint. Dashboard fetches try that address first, then return to Bonjour after a connection failure. Renew an older pairing once to receive the hint. An unsuccessful first fetch shows a retry screen instead of staying on SYNCING; the corner controls remain available.

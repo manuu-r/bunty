@@ -3,22 +3,22 @@
 #include <Arduino.h>
 
 class Preferences;
-class TapInput;
 
 // Gauge Accessory Protocol commissioning over Bluetooth LE Secure Connections.
 //
-// A tap answers the numeric-comparison prompt, Gauge writes a sequenced
+// An on-screen Yes/No button answers the numeric-comparison prompt, Gauge writes a sequenced
 // commissioning document over the MITM-protected link, and Bunty joins the
 // Wi-Fi network it names. Everything the runtime needs afterwards is in NVS, so
 // Bluetooth is released before audio claims DMA memory.
 //
-// The link is encrypted and authenticated but never bonded: pairing is one act
-// with one purpose, and it leaves nothing behind on either side. The static
-// random address is minted once and kept for the life of the device, so a Mac
-// always recognises this accessory as the same one.
+// The link is encrypted, authenticated, and bonded for this commissioning
+// session. Gauge forgets that pairing when it disconnects. Any link key still
+// stored here is cleared before advertising, so the next session compares
+// numbers again. The static random address is minted once and kept for the
+// life of the device, so a Mac always recognises this accessory as the same one.
 namespace pairing {
 
-void begin(Preferences &storage, TapInput &taps, const String &deviceName,
+void begin(Preferences &storage, const String &deviceName,
            const String &hardwareId);
 
 // Begins advertising. Returns false and sets error() if the controller or its

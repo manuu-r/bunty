@@ -14,7 +14,7 @@
 #include "Config.h"
 #include "Memory.h"
 #include "Ui.h"
-#include "TapInput.h"
+#include "Touch.h"
 
 namespace pairing {
 namespace {
@@ -22,7 +22,6 @@ namespace {
 using namespace cfg::pairing;
 
 Preferences *storage_ = nullptr;
-TapInput *taps_ = nullptr;
 String deviceName_;
 String hardwareId_;
 String error_;
@@ -33,8 +32,12 @@ BLESecurity security_;
 
 bool started_ = false;
 bool wifiJoinStarted_ = false;
+std::atomic<uint8_t> wifiFailureReason_{0};
+bool wifiEventsRegistered_ = false;
 uint32_t wifiJoinStartedAt_ = 0;
 uint32_t completedAt_ = 0;
+
+void clearStoredBonds();
 
 // Written from the Bluedroid callback task, read from loop().
 std::atomic<bool> configurationReady_{false};
@@ -117,6 +120,13 @@ bool saveCommission(JsonDocument &document) {
     return false;
   }
 
+  IPAddress serverIp;
+  const char *address = document["server_ipv4"] | "";
+  if (*address && serverIp.fromString(address) && serverIp[0] != 0 && serverIp[0] != 127) {
+    storage_->putString(cfg::nvs::kServerIp, address);
+  } else {
+    storage_->remove(cfg::nvs::kServerIp);
+  }
   return storage_->putUShort(cfg::nvs::kApiVersion, version) ==
              sizeof(uint16_t) &&
          storage_->putString(cfg::nvs::kDeviceId, configuredDevice) > 0 &&
@@ -201,6 +211,7 @@ class SecurityCallbacks final : public BLESecurityCallbacks {
 
   void onAuthenticationComplete(esp_ble_auth_cmpl_t result) override {
     authenticated_ = result.success;
+    logPrintf("[pairing] authentication %s\n", result.success ? "succeeded" : "failed");
     if (!result.success) {
       logPrintf("[pairing] authentication failed: 0x%02x\n",
                     result.fail_reason);
@@ -209,9 +220,27 @@ class SecurityCallbacks final : public BLESecurityCallbacks {
   }
 
   bool onConfirmPIN(uint32_t pin) override {
+    logPrintf("[pairing] numeric comparison requested; waiting for on-screen Yes/No\n");
+    if (!touch::available()) {
+      logPrintf("[pairing] rejected: touch controller unavailable\n");
+      return false;
+    }
     ui::showNumericComparison(pin);
-    const bool accepted =
-        taps_ && taps_->waitForPairingDecision() == TapDecision::Confirm;
+    touch::flush();
+    const uint32_t deadline = millis() + cfg::touch::kPairingDecisionTimeoutMs;
+    bool accepted = false;
+    while (static_cast<int32_t>(millis() - deadline) < 0) {
+      const touch::Event event = touch::poll();
+      if (event.kind != touch::Event::Kind::kTap) {
+        delay(20);
+        continue;
+      }
+      logPrintf("[pairing] touch released x=%d y=%d\n", event.x, event.y);
+      if (ui::confirmAcceptedAt(event.x, event.y)) accepted = true;
+      else if (!ui::confirmRejectedAt(event.x, event.y)) continue;
+      break;
+    }
+    logPrintf("[pairing] local decision: %s\n", accepted ? "accepted" : "rejected or timed out");
     if (accepted) {
       ui::showPairingConfirmed();
     } else {
@@ -223,11 +252,14 @@ class SecurityCallbacks final : public BLESecurityCallbacks {
 
 class ServerCallbacks final : public BLEServerCallbacks {
  public:
+  void onConnect(BLEServer *) override { logPrintf("[pairing] BLE connected\n"); }
   void onDisconnect(BLEServer *) override {
+    logPrintf("[pairing] BLE disconnected\n");
     authenticated_ = false;
-    // Nothing is retained from an interrupted attempt: the session was never
-    // bonded, so the next one starts from numeric comparison again.
+    // An interrupted attempt may already have bonded. Drop that key before
+    // advertising again so the next confirmation is a fresh comparison.
     if (started_ && completedAt_ == 0) {
+      clearStoredBonds();
       BLEDevice::startAdvertising();
       ui::showPairing();
     }
@@ -240,9 +272,9 @@ ServerCallbacks serverCallbacks;
 
 // --------------------------------------------------------------- identity ---
 
-// Commissioning never bonds, so a stored link key can only be residue from an
-// older firmware. Dropping it keeps the controller's view and the Mac's view of
-// this accessory in agreement.
+// A link key from an earlier session lets macOS skip numeric comparison, or
+// stall the encrypted read if this device no longer has the matching key.
+// Drop it before advertising so the next attempt compares numbers again.
 void clearStoredBonds() {
   const int count = esp_ble_get_bond_device_num();
   if (count <= 0) return;
@@ -298,10 +330,9 @@ String identityJson() {
 
 }  // namespace
 
-void begin(Preferences &storage, TapInput &taps, const String &deviceName,
+void begin(Preferences &storage, const String &deviceName,
            const String &hardwareId) {
   storage_ = &storage;
-  taps_ = &taps;
   deviceName_ = deviceName;
   hardwareId_ = hardwareId;
 }
@@ -320,11 +351,12 @@ bool start() {
   BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
   BLEDevice::setSecurityCallbacks(&securityCallbacks);
   BLEDevice::setCustomGapHandler(gapEvent);
-  // Secure Connections with numeric comparison, but deliberately no bond.
-  // Commissioning is a single act that hands over Wi-Fi and a bearer token;
-  // everything afterwards runs over the LAN, so a stored link key would only
-  // leave a permanent, unusable entry in the Mac's Bluetooth list.
-  security_.setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM);
+  // Secure Connections numeric comparison, with bonding. macOS shows the
+  // number either way, but without the Bonding flag it never completes the
+  // encrypted read, so both confirmation screens succeed and Gauge times out.
+  // This key is cleared before the next session, and Gauge forgets its copy
+  // before connecting, so the number is compared again each time.
+  security_.setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
   security_.setCapability(ESP_IO_CAP_IO);
   security_.setKeySize(16);
   security_.setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
@@ -401,6 +433,13 @@ bool service() {
       configurationReady_ = false;
       return false;
     }
+    wifiFailureReason_ = 0;
+    if (!wifiEventsRegistered_) {
+      WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+        wifiFailureReason_ = info.wifi_sta_disconnected.reason;
+      }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+      wifiEventsRegistered_ = true;
+    }
     setStatus("joining");
     wifiJoinStarted_ = true;
     wifiJoinStartedAt_ = millis();
@@ -421,7 +460,14 @@ bool service() {
       setStatus("connected");
       completedAt_ = millis();
     } else if (millis() - wifiJoinStartedAt_ > kWifiJoinTimeoutMs) {
-      setStatus("error:wifi connection failed");
+      const uint8_t reason = wifiFailureReason_.load();
+      if (reason == WIFI_REASON_NO_AP_FOUND) {
+        setStatus("error:Wi-Fi network not found. Choose a 2.4 GHz network, check its name, and move Bunty closer to the router.");
+      } else if (reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
+        setStatus("error:Wi-Fi authentication failed. Check the Wi-Fi password and router security settings.");
+      } else {
+        setStatus("error:Wi-Fi connection timed out. Check the router and retry on a 2.4 GHz network.");
+      }
       configurationReady_ = false;
       wifiJoinStarted_ = false;
       WiFi.disconnect(false, false);

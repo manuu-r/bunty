@@ -12,7 +12,7 @@
 
 #include "Config.h"
 #include "VoiceCerts.h"
-#include "TapInput.h"
+#include "MicrophoneInput.h"
 #include "InternalAllocation.h"
 
 namespace {
@@ -65,7 +65,7 @@ const char *BuntyVoice::stateName(State state) {
   return "?";
 }
 
-bool BuntyVoice::begin(TapInput *microphone, const char *gatewayHost,
+bool BuntyVoice::begin(MicrophoneInput *microphone, const char *gatewayHost,
                        const char *deviceId, const char *gatewayToken,
                        const char *sessionId) {
   if (running_) return true;
@@ -179,7 +179,7 @@ bool BuntyVoice::begin(TapInput *microphone, const char *gatewayHost,
 
   logPrintf("[voice] transport ready for %s as %s\n", uri_,
                 deviceId);
-  logPrintf("[voice] WebRTC VAD mode=%d frame=%u ms onset=%u ms preroll=%u ms no-speech=%u ms; gateway endpoint; tap to arm\n",
+  logPrintf("[voice] WebRTC VAD mode=%d frame=%u ms onset=%u ms preroll=%u ms no-speech=%u ms; gateway endpoint; touch the screen to arm\n",
       kVadMode, unsigned(kFrameDurationMs), unsigned(kSpeechStartMs),
       unsigned(kPreRollFrames * kFrameDurationMs), unsigned(kNoSpeechTimeoutMs));
   logPrintf("[memory] voice psram capture=%u playback=%u compressed=%u control=%u arena=%u; internal preroll=%u pcm=4608 upload=%u\n",
@@ -241,7 +241,7 @@ void BuntyVoice::arm() {
   // noise boundary; pre-roll retains the lead-in, so detection does not clip
   // the first word.
   if (state_ == State::Listening) {
-    Serial.println("[voice] armed by tap; waiting for speech");
+    Serial.println("[voice] armed by touch; waiting for speech");
   }
 }
 
@@ -269,7 +269,7 @@ void BuntyVoice::serviceNetwork() {
   if ((state_ == State::Listening || state_ == State::Offline) &&
       conversation_.expire(millis())) {
     resetGateRequested_ = true;
-    Serial.println("[voice] no speech for 4000 ms; session closed, tap to talk again");
+    Serial.println("[voice] no speech for 4000 ms; session closed, touch the screen to talk again");
   }
 
   // Transport teardown is driven from voice-net, never from the WebSocket event
@@ -301,7 +301,7 @@ void BuntyVoice::serviceNetwork() {
       state_ = State::Listening;
       if (armed()) conversation_.arm(millis());
       Serial.println(armed() ? "[voice] turn complete; 4 s follow-up window"
-                             : "[voice] turn complete; tap to talk again");
+                             : "[voice] turn complete; touch the screen to talk again");
     }
     cleanupStarted_ = false;
     socketCleanupRequested_ = false;
@@ -429,7 +429,7 @@ void BuntyVoice::abortInput(const char *reason) {
   conversation_.close();
   closeSessionRequested_ = true;
   socketCleanupRequested_ = true;
-  logPrintf("[voice] %s; closing session, tap to talk again\n", reason);
+  logPrintf("[voice] %s; closing session, touch the screen to talk again\n", reason);
 }
 
 void BuntyVoice::websocketEvent(void *handler, esp_event_base_t base,
@@ -693,7 +693,7 @@ void BuntyVoice::uploadTask(void *context) {
     }
 
     if (state == State::Connecting) {
-      // TapInput keeps filling its large PSRAM capture ring while TLS and the
+      // MicrophoneInput keeps filling its large PSRAM capture ring while TLS and the
       // gateway's Flux connection open. Do not consume those samples yet.
       vadWasArmed = false;
       delay(10);
@@ -711,7 +711,7 @@ void BuntyVoice::uploadTask(void *context) {
     if (state == State::Uploading && !streamStarted) {
       voice->uploadIdle_ = false;
       // The capture ring holds every frame collected while TLS and Flux
-      // connected, beginning at the user's tap. No energy threshold decides
+      // connected, beginning at the user's touch. No energy threshold decides
       // whether those opening words are sent.
       voice->flushPreRoll();
       if (voice->state_ != State::Uploading) continue;

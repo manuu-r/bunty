@@ -17,43 +17,31 @@ constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
 // ---------------------------------------------------------------- wiring ---
 
 namespace pin {
-// The Waveshare ESP32-S3-Touch-LCD-2 differs from the carrier board in two
-// spots. Its on-board ST7789T3 (still 240x320) sits on the board's LCD/SD SPI
-// bus and has no reset GPIO, so kTftRst is -1 and the driver does a software
-// reset. And GPIO5 is not on its P1/P2 headers (it is the battery-ADC
-// divider), so the amplifier word-select moves to the spare GPIO18. Every
-// other servo/amp/mic pin is unchanged, so the same external harness moves
-// between boards.
-#if defined(BUNTY_BOARD_WAVESHARE)
+// Waveshare ESP32-S3-Touch-LCD-2. GPIO4 is the only pin left free.
 constexpr int kTftCs = 45;
 constexpr int kTftDc = 42;
-constexpr int kTftRst = -1;
+constexpr int kTftRst = -1;        // no reset line; the driver resets in software
 constexpr int kTftBacklight = 1;   // active-high, via an NPN on the board
 constexpr int kTftMosi = 38;
 constexpr int kTftSclk = 39;
 
-constexpr int kAmpLrc = 18;
-#else
-constexpr int kTftCs = 10;
-constexpr int kTftDc = 9;
-constexpr int kTftRst = 14;
-constexpr int kTftBacklight = 21;
-constexpr int kTftMosi = 11;
-constexpr int kTftSclk = 12;
+constexpr int kTouchSda = 48;
+constexpr int kTouchScl = 47;
+constexpr int kTouchInterrupt = 46;
 
-constexpr int kAmpLrc = 5;
-#endif
+constexpr int kTurnServo = 9;   // SG90, head yaw
+constexpr int kTiltServo = 14;  // MG90S, head pitch
 
-constexpr int kTurnServo = 8;
-constexpr int kTiltServo = 7;
+// UART0's pads are free for the amplifier: Serial runs over native USB.
+constexpr int kAmpShutdown = 2;
+constexpr int kAmpBclk = 15;
+constexpr int kAmpLrc = 43;
+constexpr int kAmpDin = 44;
 
-constexpr int kAmpShutdown = 13;
-constexpr int kAmpBclk = 4;
-constexpr int kAmpDin = 6;
-
-constexpr int kMicBclk = 15;
-constexpr int kMicWs = 16;
-constexpr int kMicData = 17;
+// Both mics share this bus; opposite L/R straps put each on its own half-frame.
+constexpr int kMicBclk = 11;
+constexpr int kMicWs = 12;
+constexpr int kMicData = 13;
 }  // namespace pin
 
 // The amplifier and the microphone each own an I2S controller for the whole
@@ -90,10 +78,9 @@ constexpr uint16_t kDanger = rgb565(255, 102, 118);
 
 namespace servo {
 constexpr bool kEnabled = true;
-// GPIO 8 is the verified turn-servo signal. Keep the unresolved GPIO 7 tilt
-// path disconnected until its wiring/power issue has been diagnosed.
 constexpr bool kTurnEnabled = true;
-constexpr bool kTiltEnabled = false;
+// Both axes are wired on this carrier: SG90 on the yaw, MG90S on the pitch.
+constexpr bool kTiltEnabled = true;
 constexpr uint8_t kTurnChannel = 2;
 constexpr uint8_t kTiltChannel = 3;
 constexpr uint8_t kTurnHomeAngle = 100;
@@ -108,6 +95,127 @@ constexpr float kSweepDegrees = 40.0f;
 // stepping in small hobby servos while still completing inside the page dwell.
 constexpr float kSweepDegreesPerSecond = 30.0f;
 }  // namespace servo
+
+// ----------------------------------------------------------------- touch ---
+
+namespace touch {
+constexpr uint32_t kPairingDecisionTimeoutMs = 30000;
+// Hynitron CST816-family controller on the shared touch/IMU I2C bus.
+constexpr uint8_t kAddress = 0x15;
+constexpr uint32_t kBusHz = 400000;
+constexpr uint32_t kLongPressMs = 650;
+// A press that wanders further than this is a drag, not a tap.
+constexpr int16_t kSlopPixels = 24;
+constexpr uint32_t kDebounceMs = 120;
+// The controller's auto-sleep default is re-disabled this often, so a glitch
+// cannot leave the panel permanently unresponsive.
+constexpr uint32_t kReconfigureMs = 4000;
+constexpr uint32_t kSampleMs = 15;
+// Draws a ring where each touch landed. Leave on until the panel's orientation
+// has been confirmed on the real device.
+constexpr bool kShowMarker = true;
+
+// The panel is mounted 180 degrees from the controller's origin: a touch at
+// the bottom left reports as the top right.
+constexpr bool kSwapXY = false;
+constexpr bool kInvertX = true;
+constexpr bool kInvertY = true;
+}  // namespace touch
+
+// ------------------------------------------------------------ microphones ---
+
+namespace mic {
+constexpr uint32_t kSampleRate = 16000;
+constexpr int32_t kVoiceCaptureGain = 8;
+// Swap these if Bunty turns away from the talker: it depends on how the L/R
+// straps were soldered.
+constexpr uint8_t kLeftSlot = 0;
+constexpr uint8_t kVoiceSlot = 0;
+
+// Centre-to-centre. MEASURE THIS: every bearing scales directly with it.
+constexpr float kSpacingMm = 60.0f;
+constexpr float kSpeedOfSoundMmPerMs = 343.0f;  // 20 C, dry air
+}  // namespace mic
+
+// -------------------------------------------------------- sound direction ---
+
+// At 16 kHz and 60 mm apart the whole usable range is under three samples, so
+// this is a coarse bearing, never a precise angle.
+namespace hearing {
+constexpr size_t kWindowSamples = 256;
+constexpr int kMaxLagSamples = 4;
+constexpr uint32_t kMinimumRms = 900;
+// Reverberation and two talkers both show up as a low, flat correlation peak.
+constexpr uint8_t kMinimumConfidence = 35;
+constexpr uint8_t kAgreeingWindows = 3;
+constexpr float kAgreementDegrees = 20.0f;
+constexpr uint32_t kFreshMs = 1500;
+
+// A head that twitches at every syllable reads as nervous, not attentive.
+constexpr float kDeadzoneDegrees = 12.0f;
+constexpr float kMaximumTurnDegrees = 45.0f;
+constexpr uint32_t kTurnCooldownMs = 1200;
+constexpr float kTurnDegreesPerSecond = 45.0f;
+}  // namespace hearing
+
+// ----------------------------------------------------------------- power ---
+
+// Bunty runs from a 1500 mAh pack through a buck-boost converter rated for 2 A.
+// Nothing downstream is measured, so these are modelled worst-case figures used
+// to keep concurrent loads under the converter's ceiling. Measure your own
+// build and correct them; too low browns out mid-gesture, too high refuses
+// motion that would have been fine.
+namespace power {
+// The converter is rated 2 A; 1500 mA is the design ceiling Bunty holds itself
+// to, so the converter is never asked for its last 25%.
+constexpr uint16_t kRailMilliamps = 1500;
+// Wi-Fi and BLE transmit whenever the stack decides to. Nothing can gate those
+// bursts, so the budget simply never spends this much.
+constexpr uint16_t kReserveMilliamps = 350;
+constexpr uint16_t kBaseMilliamps = 300;      // module, panel, radio average
+constexpr uint16_t kBacklightMilliamps = 80;  // at full duty
+constexpr uint16_t kServoMilliamps = 750;     // SG90 under load
+constexpr uint16_t kAudioMilliamps = 450;     // MAX98357 into 4 ohm, loud
+constexpr uint16_t kBatteryMilliampHours = 1500;
+
+// The policy falls out of this arithmetic rather than out of special cases:
+// exactly one large load runs at a time, and audio outranks motion.
+static_assert(kBaseMilliamps + kBacklightMilliamps + kServoMilliamps <=
+                  kRailMilliamps - kReserveMilliamps,
+              "one servo must fit inside the rail budget");
+static_assert(kBaseMilliamps + kBacklightMilliamps + kAudioMilliamps <=
+                  kRailMilliamps - kReserveMilliamps,
+              "the speaker must fit inside the rail budget");
+static_assert(kBaseMilliamps + kBacklightMilliamps + kServoMilliamps +
+                      kAudioMilliamps >
+                  kRailMilliamps - kReserveMilliamps,
+              "a servo must not be able to run while Bunty is speaking");
+static_assert(kBaseMilliamps + kBacklightMilliamps + 2 * kServoMilliamps >
+                  kRailMilliamps - kReserveMilliamps,
+              "two servos at once must not fit inside the rail budget");
+
+// How long a displaced load waits, so the two never overlap on the rail.
+constexpr uint32_t kRevokeSettleMs = 40;
+
+// Quarter-dBm; 52 is 13 dBm, roughly halving the TX burst the reserve covers.
+constexpr int8_t kWifiTxPowerQuarterDbm = 52;
+
+// APB stays at 80 MHz across these, so servo LEDC and display SPI are unaffected.
+constexpr uint32_t kIdleAfterMs = 1500;
+constexpr uint8_t kIdleCpuMhz = 80;
+constexpr uint8_t kActiveCpuMhz = 240;
+
+constexpr uint32_t kConservativeMs = 10 * 60 * 1000;
+constexpr uint8_t kConservativeBacklight = 160;
+constexpr int32_t kConservativeVolumePercent = 45;
+constexpr float kConservativeServoDegreesPerSecond = 20.0f;
+
+constexpr uint8_t kSaverBacklight = 60;
+constexpr int32_t kSaverVolumePercent = 30;
+// Disabled by default: the gauge has no feedback and drifts.
+constexpr uint8_t kSaverPercent = 0;
+constexpr uint32_t kFuelPersistMs = 60000;
+}  // namespace power
 
 // --------------------------------------------------------------- pairing ---
 
@@ -169,52 +277,6 @@ constexpr size_t kLimitRowsPerPage = 6;
 constexpr size_t kEventRowsPerPage = 5;
 constexpr size_t kTodoRowsPerPage = 6;
 }  // namespace dashboard
-
-// ------------------------------------------------------------------ taps ---
-
-namespace tap {
-constexpr uint32_t kSampleRate = 16000;
-constexpr uint32_t kMinimumLevel = 24000;
-constexpr uint32_t kNoiseMultiplier = 7;
-constexpr uint32_t kRefractoryMs = 150;
-constexpr uint32_t kQuietToRearmMs = 70;
-// The MEMS microphone's useful speech occupies only a small part of the signed
-// 24-bit slot. After converting to linear16, restore 18 dB of level for VAD and
-// STT; saturating arithmetic protects close taps and loud speech.
-constexpr int32_t kVoiceCaptureGain = 8;
-// Roughly 150 ms of audio is enough to tell the live microphone slot from the
-// silent one without delaying the first spoken word noticeably.
-constexpr uint16_t kSlotProbeReads = 50;
-
-// Wake and unpair are graded by absolute level and by headroom over the
-// measured room noise, so a soft knock cannot trigger a destructive gesture.
-constexpr uint32_t kWakeMinimumLevel = 60000;
-constexpr uint32_t kWakeNoiseMultiplier = 10;
-constexpr uint32_t kUnpairMinimumLevel = 180000;
-constexpr uint32_t kUnpairNoiseMultiplier = 16;
-
-// Double tap arms voice. A single tap does nothing, so an accidental knock or
-// a bump of the desk cannot start a conversation on its own.
-constexpr uint32_t kArmDoubleTapWindowMs = 300;
-// An enclosure echo arrives within a few tens of milliseconds of the strike;
-// requiring a real gap keeps one physical tap from counting as two.
-constexpr uint32_t kArmDoubleTapMinimumGapMs = 70;
-
-// Keep destructive taps distinctly slower than the quick double tap that starts
-// a conversation. Their timing windows intentionally do not overlap.
-constexpr uint32_t kUnpairMinimumGapMs = 450;
-constexpr uint32_t kUnpairMaximumGapMs = 1000;
-// Unpairing is destructive, so require a clearly intentional rhythm: three firm
-// taps, a noticeable pause, then three more firm taps.
-constexpr uint32_t kUnpairInterGroupMinimumMs = 1500;
-constexpr uint32_t kUnpairInterGroupMaximumMs = 3500;
-constexpr uint32_t kUnpairConfirmationGuardMs = 1000;
-constexpr uint32_t kUnpairConfirmationTimeoutMs = 6000;
-constexpr uint8_t kUnpairTapsPerGroup = 3;
-
-constexpr uint32_t kPairingDecisionTimeoutMs = 30000;
-constexpr uint32_t kPairingDoubleTapWindowMs = 700;
-}  // namespace tap
 
 // ----------------------------------------------------------------- audio ---
 
@@ -305,11 +367,15 @@ constexpr char kToken[] = "token";
 constexpr char kServiceType[] = "service";
 constexpr char kPath[] = "path";
 constexpr char kPort[] = "port";
+constexpr char kServerIp[] = "server_ip";
 constexpr char kWifiSsid[] = "wifi_ssid";
 constexpr char kWifiPassword[] = "wifi_pass";
 constexpr char kDashboard[] = "dashboard";
 constexpr char kPaired[] = "paired";
 constexpr char kBleAddress[] = "ble_addr";
+
+constexpr char kBrownouts[] = "brownouts";
+constexpr char kFuelUsed[] = "fuel_mas";
 
 constexpr char kIotToken[] = "iot_token";
 constexpr char kIotDevice[] = "iot_device";
@@ -317,7 +383,7 @@ constexpr char kIotSession[] = "iot_session";
 
 constexpr const char *kGaugeKeys[] = {
     kApiVersion, kDeviceId, kServerId,     kToken,     kServiceType,
-    kPath,       kPort,     kWifiSsid,     kWifiPassword, kDashboard,
+    kPath,       kPort, kServerIp,     kWifiSsid,     kWifiPassword, kDashboard,
     kPaired,
 };
 }  // namespace nvs

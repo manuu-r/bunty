@@ -3,8 +3,6 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 
-class TapInput;
-
 // Everything that makes sound leave the MAX98357, plus the MP3 decoder both
 // the boot greeting and the gateway's spoken replies share.
 
@@ -88,9 +86,8 @@ class Mp3Stream {
 };
 
 // Plays the embedded greeting on its own task so loop() stays free to animate.
-// The clip is loud enough to trip the tap detector, so capture is suppressed
-// for its duration and briefly afterwards.
+// Voice capture waits until the greeting finishes.
 namespace greeting {
-bool start(TapInput *taps);
+bool start();
 bool playing();
 }  // namespace greeting

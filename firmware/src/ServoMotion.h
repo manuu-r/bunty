@@ -5,7 +5,7 @@
 #include <freertos/queue.h>
 
 // Small, non-blocking hobby-servo driver. It owns one LEDC channel and glides
-// to a target angle along an eased profile so display, tap, and network work
+// to a target angle along an eased profile so display, touch, and network work
 // keep running while Bunty changes posture. Position is a pure function of
 // wall-clock time, so a stalled loop() resumes the glide smoothly instead of
 // snapping several degrees at once.
@@ -13,6 +13,8 @@ class ServoMotion {
  public:
   bool begin(uint8_t pin, uint8_t channel, uint8_t initialAngle);
   void moveTo(float angle);
+  // Safe from another task; applied on the servo task's next tick.
+  void hold();
   bool moving() const { return submitted_ != applied_ || moving_; }
 
   // Glide rate for subsequent moves. A gesture that should read as deliberate
@@ -64,5 +66,6 @@ class ServoMotion {
   uint32_t moveDurationMs_ = 0;
   uint32_t lastUpdateMs_ = 0;
   std::atomic<bool> moving_{false};
+  std::atomic<bool> hold_{false};
   bool ready_ = false;
 };

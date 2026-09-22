@@ -31,11 +31,21 @@ void ServoMotion::moveTo(float angle) {
   xQueueOverwrite(commands_, &command);
 }
 
+void ServoMotion::hold() { hold_ = true; }
+
 void ServoMotion::task(void *context) {
   auto *motion = static_cast<ServoMotion *>(context);
   TickType_t tick = xTaskGetTickCount();
   uint32_t sampled = 0;
   for (;;) {
+    if (motion->hold_.exchange(false)) {
+      // Forget queued targets so a revoked gesture cannot resume later.
+      xQueueReset(motion->commands_);
+      motion->applied_ = motion->submitted_.load();
+      motion->moving_ = false;
+      motion->startAngle_ = motion->currentAngle_;
+      motion->targetAngle_ = motion->currentAngle_;
+    }
     Command target;
     if (xQueueReceive(motion->commands_, &target, 0) == pdTRUE) {
       motion->applyTarget(target.angle);

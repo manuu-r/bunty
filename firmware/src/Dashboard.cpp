@@ -26,6 +26,9 @@ String hostname_;
 // libraries still allocate their own HTTP/mDNS objects, exclusively on core 0.
 String serverId_, mdnsHost_, requestPath_, authorization_, addressHost_;
 uint16_t configuredPort_ = 0;
+IPAddress configuredAddress_;
+bool directAddressFailed_ = false;
+bool attemptedFetch_ = false;
 size_t tokenLength_ = 0;
 char wifiSsid_[33] = {}, wifiPassword_[65] = {};
 
@@ -183,6 +186,13 @@ bool resolveByHostname(const String &serverId, IPAddress &address,
 }
 
 bool locateGauge(IPAddress &address, uint16_t &port, String &path) {
+  if (!directAddressFailed_ && configuredAddress_ != IPAddress() &&
+      sameSubnet(configuredAddress_, WiFi.localIP(), WiFi.subnetMask())) {
+    address = configuredAddress_;
+    port = configuredPort_;
+    path = storedPath();
+    return port != 0;
+  }
   if (!startMdns()) return false;
   const String &expected = serverId_;
   if (expected.isEmpty()) {
@@ -253,6 +263,7 @@ bool locateGauge(IPAddress &address, uint16_t &port, String &path) {
 }
 
 void noteConnectFailure(const IPAddress &address, uint16_t port) {
+  directAddressFailed_ = true;
   if (connectFailures_ < UINT8_MAX) ++connectFailures_;
   logPrintf("[dashboard] TCP connect failed to %s:%u (%u/%u, RSSI %d dBm)\n",
                 AddressText(address).c_str(), port, connectFailures_,
@@ -290,6 +301,8 @@ bool fetch() {
     return false;
   }
   connectFailures_ = 0;
+  configuredAddress_ = address;
+  directAddressFailed_ = false;
 
   HTTPClient request;
   request.setConnectTimeout(kConnectTimeoutMs);
@@ -390,12 +403,9 @@ void drawHeader(const char *title) {
 }
 
 void drawFooter() {
-  Display &panel = ui::display();
-  panel.drawFastHLine(12, 292, 216, cfg::ui::kBorder);
-  ui::drawText(BuntyFonts::kBody, "3 slow taps, pause, 3 slow: unpair", 12, 313,
-               cfg::ui::kMuted);
-  ui::drawTextRight(BuntyFonts::kBody, online_ ? "LIVE" : "CACHED", 228, 313,
-                    online_ ? cfg::ui::kSuccess : cfg::ui::kMuted);
+  ui::drawControls();
+  ui::drawText(BuntyFonts::kBody, online_ ? "LIVE" : "CACHED", 85, 301,
+               online_ ? cfg::ui::kSuccess : cfg::ui::kMuted);
 }
 
 void drawOverview(JsonArrayConst providers) {
@@ -407,6 +417,7 @@ void drawOverview(JsonArrayConst providers) {
     JsonObjectConst provider = providers[i].as<JsonObjectConst>();
     const char *name = provider["name"] | "Agent";
     const int remaining = provider["remaining_percent"] | -1;
+    if (remaining == 0) continue;
     ui::drawText(BuntyFonts::kBody, ui::fitText(BuntyFonts::kBody, name, 120),
                  14, y, cfg::ui::kText);
     char percent[24];
@@ -429,6 +440,7 @@ void drawProvider(JsonObjectConst provider) {
     JsonObjectConst limit = limits[i].as<JsonObjectConst>();
     const char *label = limit["label"] | "Limit";
     const int remaining = limit["remaining_percent"] | -1;
+    if (remaining == 0) continue;
     ui::drawText(BuntyFonts::kBody, ui::fitText(BuntyFonts::kBody, label, 130),
                  14, y, cfg::ui::kText);
     char percent[24];
@@ -519,6 +531,9 @@ void restart() {
   tokenLength_ = token.length();
   authorization_ = "Bearer " + token;
   configuredPort_ = storage_->getUShort(cfg::nvs::kPort, 0);
+  configuredAddress_.fromString(storage_->getString(cfg::nvs::kServerIp, ""));
+  directAddressFailed_ = false;
+  attemptedFetch_ = false;
   storage_->getString(cfg::nvs::kWifiSsid, wifiSsid_, sizeof(wifiSsid_));
   storage_->getString(cfg::nvs::kWifiPassword, wifiPassword_, sizeof(wifiPassword_));
   addressHost_.reserve(16);
@@ -548,10 +563,11 @@ bool serviceFetch() {
   bool result;
   if (fetchBusy_ && xQueueReceive(fetchResults_, &result, 0) == pdTRUE) {
     fetchBusy_ = false;
+    attemptedFetch_ = true;
     const bool wasOnline = online_;
     online_ = result && acceptFetched();
     nextFetchAt_ = millis() + (online_ ? refreshMs_ : kRetryMs);
-    return online_ || wasOnline != online_;
+    return !available_ || online_ || wasOnline != online_;
   }
   if (!fetchBusy_ && static_cast<int32_t>(millis() - nextFetchAt_) >= 0) {
     uint8_t command = 1;
@@ -573,7 +589,7 @@ void nextPage() {
 void render() {
   ui::Guard guard;
   if (!available_) {
-    ui::showSyncing();
+    ui::showSyncing(attemptedFetch_);
     return;
   }
 

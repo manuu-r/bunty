@@ -96,7 +96,7 @@ inline bool gatewayEndsInput(const char *type) {
          strcmp(type, "assistant.thinking") == 0;
 }
 
-// One atomic deadline avoids losing a new tap to a concurrent timeout check.
+// One atomic deadline avoids losing a new touch to a concurrent timeout check.
 // Zero means disarmed. All intervals are below INT32_MAX; subtraction wraps.
 class ConversationWindow {
  public:

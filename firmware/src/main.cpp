@@ -13,18 +13,19 @@
 #include "Dashboard.h"
 #include "IotGatewayCredentials.h"
 #include "Pairing.h"
+#include "Power.h"
+#include "Touch.h"
+#include "SoundDirection.h"
 #include "ServoMotion.h"
 #include "Memory.h"
 #include "InternalAllocation.h"
-#include "TapGestures.h"
-#include "TapInput.h"
+#include "MicrophoneInput.h"
 #include "flow32/graphics/Display.h"
 
 namespace {
 
 Preferences preferences;
-TapInput tapInput;
-TapGestures tapGestures(tapInput);
+MicrophoneInput microphoneInput;
 BuntyVoice buntyVoice;
 BuntyAnimations *animations = nullptr;
 ServoMotion turnServo;
@@ -72,6 +73,12 @@ uint32_t nextClockSyncAt = 0;
 // change reads as a deliberate gesture rather than a silent redraw.
 enum class SweepPhase : uint8_t { Idle, Right, Left, Home };
 SweepPhase sweepPhase = SweepPhase::Idle;
+// Which servos the power budget granted for the sweep in progress.
+bool sweepTurnClaimed = false;
+bool lookClaimed = false;
+uint32_t lastLookAt = 0;
+float lookAngle = 0.0f;
+bool sweepTiltClaimed = false;
 
 wl_status_t lastWifiStatus = WL_NO_SHIELD;
 
@@ -140,7 +147,6 @@ void startRuntime(bool reconnectWifi) {
   runtimeStarted = true;
   displayState = DisplayState::Dashboard;
   lastInteractionAt = millis();
-  tapGestures.reset();
   dashboard::restart();
 
   if (reconnectWifi) {
@@ -149,19 +155,18 @@ void startRuntime(bool reconnectWifi) {
     WiFi.begin(preferences.getString(cfg::nvs::kWifiSsid, "").c_str(),
                preferences.getString(cfg::nvs::kWifiPassword, "").c_str());
   }
-  // startRuntime(false) follows a successful pairing connection, so apply the
-  // reliability setting on both the cold-boot and newly-paired paths.
-  WiFi.setSleep(false);
+  // On battery the radio sleeps between dashboard polls and wakes for voice;
+  // power::service() owns that decision on both the cold-boot and the
+  // newly-paired path.
+  power::markBusy();
   lastWifiStatus = WiFi.status();
   nextVoiceStartAt = 0;
   if (!greeting::playing()) dashboard::render();
 }
 
 void enterSleep() {
+  touch::flush();
   displayState = DisplayState::Sleeping;
-  tapGestures.reset();
-  tapInput.reset();
-  tapInput.suppressFor(500);
   {
     ui::Guard guard;
     animations->beginSleeping(millis());
@@ -172,17 +177,12 @@ void enterSleep() {
 
 void wake() {
   displayState = DisplayState::Waking;
-  tapGestures.reset();
-  // The wake knock and its enclosure echoes must never seed an unpair gesture
-  // when the dashboard returns.
-  tapInput.reset();
-  tapInput.suppressFor(BuntyAnimations::wakeDurationMs() + 400);
   {
     ui::Guard guard;
     animations->beginWaking(millis());
   }
   ui::fadeBacklightTo(255);
-  Serial.println("[display] wake tap accepted");
+  Serial.println("[display] wake touch accepted");
 }
 
 void forgetPairing() {
@@ -209,12 +209,37 @@ bool servicePageSweep() {
   const bool moving = (turnServoReady && turnServo.moving()) ||
                       (tiltServoReady && tiltServo.moving());
   const auto moveBoth = [](float turnAngle, float tiltAngle) {
-    if (turnServoReady) turnServo.moveTo(turnAngle);
-    if (tiltServoReady) tiltServo.moveTo(tiltAngle);
+    if (sweepTurnClaimed) turnServo.moveTo(turnAngle);
+    if (sweepTiltClaimed) tiltServo.moveTo(tiltAngle);
   };
+  const auto releaseSweep = []() {
+    if (sweepTurnClaimed && power::held(power::Load::kTurnServo)) {
+      power::release(power::Load::kTurnServo);
+    }
+    if (sweepTiltClaimed && power::held(power::Load::kTiltServo)) {
+      power::release(power::Load::kTiltServo);
+    }
+    sweepTurnClaimed = sweepTiltClaimed = false;
+  };
+
+  // Audio can take the rail back mid-gesture; the servo is already stopped.
+  if ((sweepTurnClaimed && !power::held(power::Load::kTurnServo)) ||
+      (sweepTiltClaimed && !power::held(power::Load::kTiltServo))) {
+    releaseSweep();
+    sweepPhase = SweepPhase::Idle;
+    return true;
+  }
 
   switch (sweepPhase) {
     case SweepPhase::Idle:
+      if (power::audioBusy()) return true;
+      sweepTurnClaimed =
+          turnServoReady && power::claim(power::Load::kTurnServo);
+      sweepTiltClaimed =
+          tiltServoReady && power::claim(power::Load::kTiltServo);
+      if (!sweepTurnClaimed && !sweepTiltClaimed) return true;
+      turnServo.setSpeed(power::servoSpeed(cfg::servo::kSweepDegreesPerSecond));
+      tiltServo.setSpeed(power::servoSpeed(cfg::servo::kSweepDegreesPerSecond));
       sweepPhase = SweepPhase::Right;
       moveBoth(turnHome + cfg::servo::kSweepDegrees,
                tiltHome + cfg::servo::kSweepDegrees);
@@ -232,41 +257,156 @@ bool servicePageSweep() {
       return false;
     case SweepPhase::Home:
       if (moving) return false;
+      releaseSweep();
       sweepPhase = SweepPhase::Idle;
       return true;
   }
   return true;
 }
 
-void applyIntents(const TapGestures::Intents &intents) {
-  if (intents.interacted) lastInteractionAt = millis();
-  if (intents.armVoice) buntyVoice.arm();
-  if (intents.wake) wake();
-  if (intents.promptUnpair) ui::showUnpairPrompt();
-  if (intents.cancelPrompt) {
-    tapInput.reset();
-    tapInput.suppressFor(500);
-    dashboard::render();
+void serviceLookAtSpeaker() {
+  if (!turnServoReady) return;
+
+  if (lookClaimed && !turnServo.moving()) {
+    power::release(power::Load::kTurnServo);
+    lookClaimed = false;
   }
-  if (intents.confirmUnpair) forgetPairing();
+
+  // Face forward again so the next conversation does not start from a stale bearing.
+  if (!buntyVoice.armed() && !buntyVoice.engaged()) {
+    if (lookAngle != 0.0f && !lookClaimed && sweepPhase == SweepPhase::Idle &&
+        !power::audioBusy() && power::claim(power::Load::kTurnServo)) {
+      lookClaimed = true;
+      lookAngle = 0.0f;
+      hearing::reset();
+      turnServo.setSpeed(power::servoSpeed(cfg::hearing::kTurnDegreesPerSecond));
+      turnServo.moveTo(turnHome);
+    }
+    return;
+  }
+  if (lookClaimed || sweepPhase != SweepPhase::Idle) return;
+  if (!buntyVoice.armed() && !buntyVoice.engaged()) return;
+  if (power::audioBusy()) return;
+
+  hearing::Bearing heard;
+  if (!hearing::bearing(&heard)) return;
+
+  const uint32_t now = millis();
+  if (now - lastLookAt < cfg::hearing::kTurnCooldownMs) return;
+
+  float target = heard.degrees;
+  if (target > cfg::hearing::kMaximumTurnDegrees) target = cfg::hearing::kMaximumTurnDegrees;
+  if (target < -cfg::hearing::kMaximumTurnDegrees) target = -cfg::hearing::kMaximumTurnDegrees;
+  if (fabsf(target - lookAngle) < cfg::hearing::kDeadzoneDegrees) return;
+
+  if (!power::claim(power::Load::kTurnServo)) return;
+  lookClaimed = true;
+  lastLookAt = now;
+  lookAngle = target;
+  turnServo.setSpeed(power::servoSpeed(cfg::hearing::kTurnDegreesPerSecond));
+  turnServo.moveTo(turnHome + target);
+  logPrintf("[hearing] talker %+.0f deg, confidence %u\n",
+            static_cast<double>(target), static_cast<unsigned>(heard.confidence));
+}
+
+enum class Overlay : uint8_t { kNone, kSettings, kConfirmUnpair, kConfirmDisconnect };
+Overlay overlay = Overlay::kNone;
+
+ui::SettingsStatus settingsStatus() {
+  static String network;
+  static String server;
+  network = preferences.getString(cfg::nvs::kWifiSsid, "");
+  server = preferences.getString(cfg::nvs::kServerId, "");
+  ui::SettingsStatus status;
+  status.paired = preferences.getBool(cfg::nvs::kPaired, false);
+  status.online = WiFi.status() == WL_CONNECTED && dashboard::online();
+  status.network = network.c_str();
+  status.server = server.c_str();
+  status.signal = WiFi.RSSI();
+  return status;
+}
+
+void openSettings() {
+  overlay = Overlay::kSettings;
+  touch::flush();
+  ui::showSettings(settingsStatus());
+}
+
+void closeOverlay() {
+  overlay = Overlay::kNone;
+  touch::flush();
+  dashboard::render();
+}
+
+// Drops the link without forgetting anything, so the same Mac can be rejoined
+// by restarting.
+void disconnectFromGauge() {
+  WiFi.disconnect(false, false);
+  dashboard::forgetDiscovery();
+  ui::showError("Disconnected");
+  delay(1200);
+  closeOverlay();
+}
+
+void serviceSettingsTouch(const touch::Event &event) {
+  if (event.kind != touch::Event::Kind::kTap) return;
+  switch (overlay) {
+    case Overlay::kSettings:
+      switch (ui::settingsRowAt(event.x, event.y)) {
+        case ui::SettingsRow::kPair:
+          ui::showError("Restarting to pair");
+          delay(900);
+          forgetPairing();
+          break;
+        case ui::SettingsRow::kDisconnect:
+          overlay = Overlay::kConfirmDisconnect;
+          touch::flush();
+          ui::showConfirm("DISCONNECT?", "Stays paired with this Mac");
+          break;
+        case ui::SettingsRow::kUnpair:
+          overlay = Overlay::kConfirmUnpair;
+          touch::flush();
+          ui::showConfirm("UNPAIR?", "Bunty will forget this Mac");
+          break;
+        case ui::SettingsRow::kClose:
+          closeOverlay();
+          break;
+        case ui::SettingsRow::kNone:
+          break;
+      }
+      return;
+    case Overlay::kConfirmUnpair:
+      if (ui::confirmAcceptedAt(event.x, event.y)) forgetPairing();
+      else if (ui::confirmRejectedAt(event.x, event.y)) openSettings();
+      else closeOverlay();
+      return;
+    case Overlay::kConfirmDisconnect:
+      if (ui::confirmAcceptedAt(event.x, event.y)) disconnectFromGauge();
+      else if (ui::confirmRejectedAt(event.x, event.y)) openSettings();
+      else closeOverlay();
+      return;
+    case Overlay::kNone:
+      return;
+  }
 }
 
 // Returns true while a face animation intentionally owns the screen.
 bool serviceFace() {
   const uint32_t now = millis();
   if (displayState == DisplayState::Sleeping) {
-    applyIntents(tapGestures.serviceSleeping());
-    if (displayState != DisplayState::Sleeping) return true;
+    if (touch::poll().kind != touch::Event::Kind::kNone) {
+      power::markBusy();
+      wake();
+      // The waking touch must not also arm voice when the dashboard returns.
+      touch::flush();
+      return true;
+    }
     ui::Guard guard;
     animations->serviceSleeping(now);
     return false;
   }
   if (displayState != DisplayState::Waking) return false;
 
-  // Suppression normally prevents events here; draining is an extra boundary
-  // between the wake gesture and the destructive runtime gesture recognizer.
-  while (tapInput.poll()) {
-  }
   bool stillWaking = false;
   {
     ui::Guard guard;
@@ -276,17 +416,12 @@ bool serviceFace() {
 
   displayState = DisplayState::Dashboard;
   lastInteractionAt = now;
-  tapInput.reset();
-  tapInput.suppressFor(500);
   dashboard::render();
   return false;
 }
 
 void serviceRuntime() {
-  if (greeting::playing()) {
-    tapInput.reset();
-    return;
-  }
+  if (greeting::playing()) return;
   if (greetingEyesShown) {
     greetingEyesShown = false;
     displayState = DisplayState::Dashboard;
@@ -295,13 +430,30 @@ void serviceRuntime() {
   }
 
   if (displayState == DisplayState::Dashboard) {
-    applyIntents(tapGestures.service(voiceStarted));
-    if (tapGestures.awaitingConfirmation()) return;
+    const touch::Event event = touch::poll();
+    if (event.kind != touch::Event::Kind::kNone) {
+      lastInteractionAt = millis();
+      power::markBusy();
+    }
+    if (overlay != Overlay::kNone) {
+      serviceSettingsTouch(event);
+      return;
+    }
+    if (event.kind != touch::Event::Kind::kNone) {
+      ui::drawTouchMarker(event.x, event.y);
+    }
+    if (event.kind == touch::Event::Kind::kLongPress ||
+        (event.kind == touch::Event::Kind::kTap &&
+         ui::settingsControlAt(event.x, event.y))) {
+      openSettings();
+      return;
+    }
+    if (event.kind == touch::Event::Kind::kTap && ui::voiceControlAt(event.x, event.y) && voiceStarted) buntyVoice.arm();
   } else if (serviceFace()) {
     return;
   }
 
-  if (displayState == DisplayState::Dashboard && !tapGestures.inProgress() &&
+  if (displayState == DisplayState::Dashboard && overlay == Overlay::kNone &&
       millis() - lastInteractionAt >= cfg::dashboard::kIdleSleepMs) {
     enterSleep();
   }
@@ -377,7 +529,7 @@ void serviceClockSync() {
     return;
   }
   // TLS certificate validity depends on a real clock. This is asynchronous;
-  // voice waits for it rather than blocking the display or tap detector.
+  // voice waits for it rather than blocking the display or touch input.
   configTime(0, 0, "time.cloudflare.com", "time.google.com", "pool.ntp.org");
   clockSyncRequested = true;
   nextClockSyncAt = millis() + cfg::net::kClockSyncRetryMs;
@@ -388,9 +540,11 @@ void serviceClockSync() {
 // opening follows the audio actually reaching the amplifier.
 void serviceVoiceFace() {
   const uint32_t now = millis();
-  const bool onDashboard = displayState == DisplayState::Dashboard;
+  // Settings owns the screen while it is open; the face would paint over it.
+  const bool onDashboard =
+      displayState == DisplayState::Dashboard && overlay == Overlay::kNone;
   const bool speaking = buntyVoice.speaking() && onDashboard;
-  // Show Bunty's face the moment a tap arms voice, so the tap has visible
+  // Show Bunty's face the moment a touch arms voice, so the touch has visible
   // feedback; the mouth only moves once Bunty is actually talking.
   const bool attentive = speaking || (buntyVoice.armed() && onDashboard);
 
@@ -510,9 +664,9 @@ void startVoice() {
   }
   logPrintf("[voice] activating (credential=%s, microphone=%s)\n",
                 isIotGatewayToken(token) ? "ready" : "missing",
-                tapInput.available() ? "ready" : "missing");
+                microphoneInput.available() ? "ready" : "missing");
 
-  voiceStarted = buntyVoice.begin(&tapInput, IOT_GATEWAY_HOST, device, token, session);
+  voiceStarted = buntyVoice.begin(&microphoneInput, IOT_GATEWAY_HOST, device, token, session);
   if (voiceStarted) {
     Serial.println("[voice] activation complete");
     return;
@@ -538,7 +692,7 @@ void serviceVoice() {
   }
 
   // A conversation counts as interaction. Without this the idle timer would put
-  // Bunty to sleep mid-sentence, and only a physical tap could wake it again.
+  // Bunty to sleep mid-sentence, and only a screen touch could wake it again.
   if (buntyVoice.engaged()) {
     lastInteractionAt = millis();
     if (displayState == DisplayState::Sleeping) wake();
@@ -582,6 +736,8 @@ void setupServos() {
     logPrintf("[servo] GPIO %d homed at %u degrees\n", pin, home);
     return true;
   };
+  power::onRevoked(power::Load::kTurnServo, []() { turnServo.hold(); });
+  power::onRevoked(power::Load::kTiltServo, []() { tiltServo.hold(); });
   turnServoReady = start(turnServo, cfg::servo::kTurnEnabled,
                          cfg::pin::kTurnServo, cfg::servo::kTurnChannel,
                          turnHome, "turn");
@@ -614,23 +770,27 @@ void setup() {
   digitalWrite(cfg::pin::kAmpShutdown, LOW);
 
   preferences.begin(cfg::nvs::kNamespace, false);
+  power::begin(preferences);
+  hearing::begin();
   syncIotGatewayCredential();
   loadIdentity();
   dashboard::begin(preferences, hardwareId);
 
-  const bool tapsReady = tapInput.begin();
-  pairing::begin(preferences, tapInput, deviceName, hardwareId);
+  const bool touchReady = touch::begin();
+  microphoneInput.begin();  // Optional for pairing; required only for voice.
+  pairing::begin(preferences, deviceName, hardwareId);
 
   if (preferences.getBool(cfg::nvs::kPaired, false)) {
     startRuntime(true);
     ui::fadeBacklight(true);
+    if (!touchReady) logPrintf("[touch] unavailable; local controls disabled\n");
     return;
   }
 
   ui::showPairing();
   ui::fadeBacklight(true);
-  if (!tapsReady) {
-    ui::showError("Microphone not ready");
+  if (!touchReady) {
+    ui::showError("Touch controller missing");
     return;
   }
   if (!pairing::start()) ui::showError(pairing::error());
@@ -638,9 +798,16 @@ void setup() {
 
 void loop() {
   if (!setupReady) { delay(100); return; }
+  // Only imminent playback holds motion off; listening leaves the head free.
+  const BuntyVoice::State voiceState = buntyVoice.state();
+  power::setAudioExpected(greeting::playing() || buntyVoice.speaking() ||
+                          voiceState == BuntyVoice::State::Thinking ||
+                          voiceState == BuntyVoice::State::Draining);
+  power::service();
   // Voice activation must not sit behind dashboard discovery/TCP. A sleeping or
   // unreachable Mac can block that local request for several seconds.
   serviceVoice();
+  serviceLookAtSpeaker();
 
   // Servo trajectories are serviced independently by their core-1 workers.
   const uint32_t now = millis();
@@ -657,7 +824,7 @@ void loop() {
       }
       greetingEyesShown = true;
       lastGreetingBarAt = millis();
-      greeting::start(&tapInput);
+      greeting::start();
       startRuntime(false);
     }
   } else if (runtimeStarted) {

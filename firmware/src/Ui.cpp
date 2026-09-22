@@ -6,6 +6,7 @@
 
 #include "Config.h"
 #include "Fonts.h"
+#include "Power.h"
 #include "flow32/graphics/Display.h"
 #include "flow32/graphics/St77xxTransport.h"
 
@@ -45,6 +46,10 @@ St77xxTransport transport(makeTransport());
 Display panel(kPanel, transport);
 SemaphoreHandle_t renderMutex = nullptr;
 StaticSemaphore_t renderMutexStorage;
+
+constexpr int16_t kConfirmTop = 150;
+constexpr int16_t kConfirmHeight = 66;
+constexpr int16_t kRejectTop = 228;
 
 uint8_t backlightDuty = 0;
 bool pairingVisible_ = false;
@@ -122,6 +127,8 @@ bool begin() {
 
 void fadeBacklightTo(uint8_t targetDuty) {
   constexpr uint8_t kSteps = 28;
+  const uint8_t ceiling = power::backlightCeiling();
+  if (targetDuty > ceiling) targetDuty = ceiling;
   const int16_t startDuty = backlightDuty;
   if (startDuty == targetDuty) return;
   for (uint8_t step = 1; step <= kSteps; ++step) {
@@ -254,8 +261,11 @@ void showNumericComparison(uint32_t pin) {
   panel.fillScreen(kBackground);
   drawCentered(BuntyFonts::kBody, "DOES THE MAC SHOW", 66, kMuted);
   drawCentered(BuntyFonts::kComparison, digits, 112, kText);
-  drawCentered(BuntyFonts::kBody, "1 TAP  YES", 197, kSuccess);
-  drawCentered(BuntyFonts::kBody, "2 TAPS  NO", 229, kDanger);
+  panel.fillRoundRect(20, kConfirmTop, kScreenWidth - 40, kConfirmHeight, 12, kSuccess);
+  drawCentered(BuntyFonts::kBody, "Yes", kConfirmTop + 24, kBackground);
+  panel.fillRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kSurface);
+  panel.drawRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kBorder);
+  drawCentered(BuntyFonts::kBody, "No", kRejectTop + 24, kText);
   panel.present();
 }
 
@@ -278,15 +288,86 @@ void showError(const char *message) {
   logPrintf("[pairing] %s\n", message);
 }
 
-void showUnpairPrompt() {
+namespace {
+
+bool settingsPaired_ = false;
+constexpr int16_t kRowHeight = 50;
+constexpr int16_t kFirstRowTop = 74;
+
+int16_t rowTop(uint8_t index) { return kFirstRowTop + index * kRowHeight; }
+
+void drawRow(uint8_t index, const char *label, const char *value,
+             uint16_t accent, bool enabled) {
+  const int16_t top = rowTop(index);
+  panel.fillRoundRect(10, top, kScreenWidth - 20, kRowHeight - 8, 10, kSurface);
+  panel.drawRoundRect(10, top, kScreenWidth - 20, kRowHeight - 8, 10, kBorder);
+  drawText(BuntyFonts::kBody, label, 24, top + 20, enabled ? accent : kMuted);
+  if (value && *value) {
+    drawTextRight(BuntyFonts::kBody, value, kScreenWidth - 24, top + 20, kMuted);
+  }
+}
+
+}  // namespace
+
+void showSettings(const SettingsStatus &status) {
+  settingsPaired_ = status.paired;
   Guard guard;
   panel.fillScreen(kBackground);
-  drawTopBar(false);
-  drawCentered(BuntyFonts::kHeading, "UNPAIR?", 76, kText);
-  drawCentered(BuntyFonts::kBody, "Bunty will forget this Mac", 139, kMuted);
-  drawCentered(BuntyFonts::kBody, "Pause 1 sec, then tap", 171, kSuccess);
-  drawCentered(BuntyFonts::kBody, "Wait 6 seconds to cancel", 203, kMuted);
+  drawCentered(BuntyFonts::kHeading, "SETTINGS", 24, kText);
+
+  if (status.paired) {
+    char signal[24];
+    snprintf(signal, sizeof(signal), "%ld dBm", static_cast<long>(status.signal));
+    drawRow(0, status.online ? "Connected" : "Offline", status.online ? signal : "",
+            status.online ? kSuccess : kDanger, true);
+    drawRow(1, status.network[0] ? status.network : "No network", "", kMuted, true);
+    drawRow(2, "Disconnect", "", kText, true);
+    drawRow(3, "Unpair", "", kDanger, true);
+  } else {
+    drawRow(0, "Not paired", "", kMuted, true);
+    drawRow(1, "Pair with a Mac", "", kAccent, true);
+  }
+  drawCentered(BuntyFonts::kBody, "Touch anywhere else to close", 296, kMuted);
   panel.present();
+}
+
+SettingsRow settingsRowAt(int16_t x, int16_t y) {
+  if (x < 10 || x > kScreenWidth - 10) return SettingsRow::kClose;
+  for (uint8_t index = 0; index < 4; ++index) {
+    const int16_t top = rowTop(index);
+    if (y < top || y >= top + kRowHeight - 8) continue;
+    switch (index) {
+      case 1: return settingsPaired_ ? SettingsRow::kNone : SettingsRow::kPair;
+      case 2: return settingsPaired_ ? SettingsRow::kDisconnect : SettingsRow::kClose;
+      case 3: return settingsPaired_ ? SettingsRow::kUnpair : SettingsRow::kClose;
+      default: return SettingsRow::kNone;
+    }
+  }
+  return SettingsRow::kClose;
+}
+
+void showConfirm(const char *title, const char *detail) {
+  Guard guard;
+  panel.fillScreen(kBackground);
+  drawCentered(BuntyFonts::kHeading, title, 48, kText);
+  if (detail && *detail) drawCentered(BuntyFonts::kBody, detail, 108, kMuted);
+
+  panel.fillRoundRect(20, kConfirmTop, kScreenWidth - 40, kConfirmHeight, 12, kSuccess);
+  drawCentered(BuntyFonts::kBody, "Yes", kConfirmTop + 24, kBackground);
+  panel.fillRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kSurface);
+  panel.drawRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kBorder);
+  drawCentered(BuntyFonts::kBody, "No", kRejectTop + 24, kText);
+  panel.present();
+}
+
+bool confirmAcceptedAt(int16_t x, int16_t y) {
+  return x >= 20 && x <= kScreenWidth - 20 && y >= kConfirmTop &&
+         y < kConfirmTop + kConfirmHeight;
+}
+
+bool confirmRejectedAt(int16_t x, int16_t y) {
+  return x >= 20 && x <= kScreenWidth - 20 && y >= kRejectTop &&
+         y < kRejectTop + kConfirmHeight;
 }
 
 void showUnpaired() {
@@ -297,14 +378,50 @@ void showUnpaired() {
   panel.present();
 }
 
-void showSyncing() {
+void showSyncing(bool failed) {
   Guard guard;
   panel.fillScreen(kBackground);
   drawTopBar(false);
-  drawCentered(BuntyFonts::kHeading, "SYNCING", 91, kText);
-  drawCentered(BuntyFonts::kBody, "Fetching Gauge stats", 158, kMuted);
-  drawCentered(BuntyFonts::kBody, "Will retry automatically", 194, kMuted);
+  drawCentered(BuntyFonts::kHeading, failed ? "FINDING MAC" : "CONNECTING", 91, kText);
+  drawCentered(BuntyFonts::kBody, failed ? "Open Gauge on your Mac" : "Looking for Gauge", 158, kMuted);
+  drawCentered(BuntyFonts::kBody, failed ? "Same Wi-Fi. Retrying..." : "Fetching your latest stats", 194, kMuted);
+  drawControls();
   panel.present();
+}
+
+void drawTouchMarker(int16_t x, int16_t y) {
+  if (!cfg::touch::kShowMarker) return;
+  Guard guard;
+  char label[16];
+  snprintf(label, sizeof(label), "%d,%d", x, y);
+  panel.fillRect(0, 40, kScreenWidth, 18, kBackground);
+  drawText(BuntyFonts::kBody, label, 8, 54, kAccent);
+  panel.drawCircle(x, y, 9, kAccent);
+  panel.drawCircle(x, y, 4, kAccent);
+  panel.present();
+}
+
+bool settingsControlAt(int16_t x, int16_t y) { return x >= 4 && x < 60 && y >= 270 && y < 320; }
+bool voiceControlAt(int16_t x, int16_t y) { return x >= 180 && x < 236 && y >= 270 && y < 320; }
+
+void drawControls() {
+  panel.fillRect(0, 270, kScreenWidth, 50, kBackground);
+  for (int x : {4, 180}) panel.fillRoundRect(x, 272, 56, 46, 10, kSurface);
+
+  // Three sliders. A gear at this size came out as two concentric circles,
+  // which reads as a map pin rather than settings.
+  for (uint8_t row = 0; row < 3; ++row) {
+    const int16_t y = 285 + row * 10;
+    panel.drawFastHLine(18, y, 28, kText);
+    panel.fillCircle(row == 1 ? 38 : 26, y, 3, kText);
+  }
+
+  // Microphone: capsule, arc, stem, base.
+  panel.fillRoundRect(204, 280, 9, 18, 4, kText);
+  panel.drawCircleHelper(208, 294, 10, 0x8, kText);
+  panel.drawCircleHelper(209, 294, 10, 0x4, kText);
+  panel.drawFastVLine(208, 304, 6, kText);
+  panel.drawFastHLine(202, 310, 13, kText);
 }
 
 }  // namespace ui

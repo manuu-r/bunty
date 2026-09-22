@@ -7,7 +7,7 @@
 #include "Config.h"
 #include "Memory.h"
 #include "InternalAllocation.h"
-#include "TapInput.h"
+#include "Power.h"
 
 namespace { std::atomic<size_t> decoderAllocatedBytes{0}; }
 size_t mp3DecoderAllocatedBytes() { return decoderAllocatedBytes.load(); }
@@ -53,6 +53,8 @@ bool speakerInstalled = false;
 
 bool Speaker::begin(uint32_t sampleRate) {
   if (open_) return true;
+  // Staying quiet beats browning out while a servo is mid-gesture.
+  if (!power::claim(power::Load::kAudio)) return false;
   memory::InternalAllocationScope allocationScope;
 
   if (speakerInstalled) {
@@ -101,12 +103,16 @@ bool Speaker::begin(uint32_t sampleRate) {
 }
 
 void Speaker::end() {
-  if (!open_) return;
+  if (!open_) {
+    power::release(power::Load::kAudio);
+    return;
+  }
   i2s_zero_dma_buffer(cfg::kSpeakerPort);
   digitalWrite(cfg::pin::kAmpShutdown, LOW);
   i2s_stop(cfg::kSpeakerPort);
   sampleRate_ = 0;
   open_ = false;
+  power::release(power::Load::kAudio);
 }
 
 bool Speaker::setSampleRate(uint32_t sampleRate) {
@@ -123,6 +129,7 @@ bool Speaker::setSampleRate(uint32_t sampleRate) {
 bool Speaker::write(const int16_t *samples, size_t frames, uint8_t channels,
                     int32_t volumePercent) {
   if (!open_ || !samples || frames == 0) return open_;
+  volumePercent = power::volumeCeiling(volumePercent);
 
   int16_t chunk[kChunkFrames * 2];
   size_t done = 0;
@@ -274,7 +281,6 @@ namespace greeting {
 namespace {
 
 std::atomic<bool> playing_{false};
-TapInput *taps_ = nullptr;
 
 void play() {
   const size_t total = static_cast<size_t>(buntyGreetingMp3End -
@@ -324,24 +330,15 @@ void play() {
 
 void task(void *) {
   play();
-  if (taps_) {
-    taps_->reset();
-    taps_->suppressFor(1000);
-  }
   playing_ = false;
   vTaskDelete(nullptr);
 }
 
 }  // namespace
 
-bool start(TapInput *taps) {
+bool start() {
   if (playing_) return true;
-  taps_ = taps;
   playing_ = true;
-  if (taps) {
-    taps->reset();
-    taps->suppressFor(1000);
-  }
   if (xTaskCreatePinnedToCore(task, "greeting", 4096, nullptr, 3, nullptr, 1) !=
       pdPASS) {
     Serial.println("[audio] could not start the greeting task");

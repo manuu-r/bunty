@@ -24,3 +24,7 @@ done
   -Isrc -I"$vad_dir/include" tests/host/voice_activity_test.cpp "$test_dir"/*.o \
   -o "$test_dir/voice_activity_test"
 "$test_dir/voice_activity_test" "$vad_dir/tests/data/audio_tiny16.wav"
+
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Itests/host/stubs -Isrc tests/host/touch_test.cpp -o "$test_dir/touch_test"
+"$test_dir/touch_test"

@@ -10,7 +10,7 @@
 #include "ControlMessage.h"
 #include "LocalVad.h"
 
-class TapInput;
+class MicrophoneInput;
 
 #ifndef IOT_GATEWAY_HOST
 #define IOT_GATEWAY_HOST "bunty.underdogthinkers.com"
@@ -24,8 +24,8 @@ class TapInput;
 // Claude answers, and Aura speaks. The gateway closes the turn only after Bunty
 // acknowledges that the speaker and DMA buffers have drained.
 //
-// The microphone is not claimed directly. TapInput owns the capture I2S port
-// and remains its only reader, publishing PCM for this class, so tap gestures
+// The microphone is not claimed directly. MicrophoneInput owns the capture I2S port
+// and remains its only reader, publishing PCM for this class. Touch controls
 // keep working while voice is armed.
 class BuntyVoice {
  public:
@@ -40,13 +40,13 @@ class BuntyVoice {
     Draining,    // Playback finished locally, acknowledgement pending.
   };
 
-  bool begin(TapInput *microphone, const char *gatewayHost,
+  bool begin(MicrophoneInput *microphone, const char *gatewayHost,
              const char *deviceId, const char *gatewayToken,
              const char *sessionId);
   void end();
 
   // Arm local VAD for a short conversation window. Until armed, room noise is
-  // ignored and no cloud socket is ever opened, so a tap is required to talk.
+  // ignored and no cloud socket is ever opened, so a touch is required to talk.
   // Each completed reply extends the window; it lapses after silence.
   void arm();
   bool armed() const { return conversation_.armed(); }
@@ -96,7 +96,7 @@ class BuntyVoice {
   void abortInput(const char *reason);
   bool openTurnSocket();
 
-  TapInput *microphone_ = nullptr;
+  MicrophoneInput *microphone_ = nullptr;
   esp_websocket_client_handle_t client_ = nullptr;
   Speaker speaker_;
   Mp3Stream decoder_;
@@ -140,7 +140,7 @@ class BuntyVoice {
   std::atomic<uint32_t> speakingSince_{0};
   std::atomic<uint32_t> lastSocketActivityAt_{0};
 
-  // Tap-to-talk. A tap starts local capture; speech onset opens cloud turns.
+  // Touch-to-talk. A tap starts local capture; speech onset opens cloud turns.
   ConversationWindow conversation_;
   InputSpeechWatchdog inputWatchdog_;
 
