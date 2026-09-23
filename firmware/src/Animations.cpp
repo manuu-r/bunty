@@ -12,27 +12,7 @@ constexpr int16_t kScreenWidth = cfg::ui::kScreenWidth;
 constexpr int16_t kScreenHeight = cfg::ui::kScreenHeight;
 constexpr int16_t kContentTop = cfg::ui::kStatusBarHeight;
 constexpr int16_t kContentHeight = kScreenHeight - kContentTop;
-constexpr int16_t kSpeakingLeft = 22;
-constexpr int16_t kSpeakingTop = 97;
-constexpr int16_t kSpeakingWidth = 196;
-constexpr int16_t kSpeakingHeight = 142;
-constexpr uint32_t kSpeakingFrameTimeMs = 105;
-// The eyes end at y=239; the mouth band starts below that and stays clear of
-// the 320 px bottom edge at full opening.
-constexpr int16_t kMouthCenterX = 120;
-constexpr int16_t kMouthCenterY = 274;
-constexpr int16_t kMouthHalfWidth = 38;
-constexpr int16_t kMouthMinGap = 2;
-constexpr int16_t kMouthMaxGap = 20;
-constexpr int16_t kMouthStroke = 3;
-constexpr int16_t kMouthMargin = 4;
-constexpr int16_t kMouthBandTop =
-    kMouthCenterY - kMouthMaxGap - kMouthStroke - kMouthMargin;
-constexpr int16_t kMouthBandHeight =
-    (kMouthMaxGap + kMouthStroke + kMouthMargin) * 2;
-constexpr int16_t kMouthBandLeft = kMouthCenterX - kMouthHalfWidth - kMouthMargin;
-constexpr int16_t kMouthBandWidth = (kMouthHalfWidth + kMouthMargin) * 2;
-constexpr int16_t kMouthSegments = 16;
+constexpr uint32_t kSpeakingFrameTimeMs = 80;
 
 // Listening glyph: sits in the gap between the 32 px status bar and the eyes,
 // which start at y=97.
@@ -67,6 +47,8 @@ enum class RoboEyeShape : uint8_t {
   Dot,
   Sleeping,
 };
+
+
 
 int16_t smaller(int16_t left, int16_t right) {
   return left < right ? left : right;
@@ -147,8 +129,11 @@ void BuntyAnimations::beginSpeaking(uint32_t now, bool present) {
   frame_ = 0;
   animationStartedAt_ = now;
   lastFrameAt_ = now;
+  face_.setEmotion(emotion_);
+  face_.reset(now);
   display_.fillRect(0, kContentTop, kScreenWidth, kContentHeight, kBackground);
   drawSpeakingFrame();
+  face_.drawMouth(display_, 0.0f, now, kBackground);
   if (present) {
     display_.present(0, kContentTop, kScreenWidth, kContentHeight);
   }
@@ -156,54 +141,15 @@ void BuntyAnimations::beginSpeaking(uint32_t now, bool present) {
 
 void BuntyAnimations::serviceSpeaking(uint32_t now) {
   if (now - lastFrameAt_ < kSpeakingFrameTimeMs) return;
-  frame_ = advanceFrame(now, lastFrameAt_, kSpeakingFrameTimeMs, frame_, 12);
-  drawSpeakingFrame();
-  display_.present(kSpeakingLeft, kSpeakingTop, kSpeakingWidth,
-                   kSpeakingHeight);
+  lastFrameAt_ = now;
+  face_.setEmotion(emotion_);
+  const Face::Rect area = face_.drawEyes(display_, now, kBackground);
+  if (area.x1 > area.x0) display_.present(area.x0, area.y0, area.x1 - area.x0, area.y1 - area.y0);
 }
 
 void BuntyAnimations::drawSpeakingFrame() {
-  struct EyePose {
-    RoboEyeShape leftShape;
-    RoboEyeShape rightShape;
-    int8_t leftY;
-    int8_t rightY;
-    uint8_t leftWidth;
-    uint8_t leftHeight;
-    uint8_t rightWidth;
-    uint8_t rightHeight;
-  };
-  static constexpr EyePose kPoses[12] = {
-      {RoboEyeShape::Pill, RoboEyeShape::Pill, 0, 0, 46, 62, 46, 62},
-      {RoboEyeShape::Focused, RoboEyeShape::Focused, -1, -1, 50, 66, 50,
-       66},
-      {RoboEyeShape::Pill, RoboEyeShape::Pill, -3, 2, 48, 70, 46, 56},
-      {RoboEyeShape::Squint, RoboEyeShape::Squint, 1, 1, 58, 22, 58, 22},
-      {RoboEyeShape::Pill, RoboEyeShape::SoftSquare, -3, 4, 44, 64, 48, 46},
-      {RoboEyeShape::SoftSquare, RoboEyeShape::Dot, 2, 2, 48, 48, 44, 44},
-      {RoboEyeShape::Focused, RoboEyeShape::Focused, 0, 0, 52, 68, 52, 68},
-      {RoboEyeShape::Pill, RoboEyeShape::Squint, -3, 7, 46, 64, 58, 20},
-      {RoboEyeShape::Squint, RoboEyeShape::Pill, 7, -3, 58, 20, 46, 64},
-      {RoboEyeShape::Pill, RoboEyeShape::Pill, 1, 1, 52, 54, 52, 54},
-      {RoboEyeShape::Squint, RoboEyeShape::Squint, 3, 3, 60, 16, 60, 16},
-      {RoboEyeShape::Pill, RoboEyeShape::Pill, 0, 0, 48, 64, 48, 64},
-  };
-
-  const EyePose &pose = kPoses[frame_ % 12];
-  display_.fillRect(kSpeakingLeft, kSpeakingTop, kSpeakingWidth,
-                    kSpeakingHeight, kBackground);
-
-  constexpr int16_t kLeftEyeX = 72;
-  constexpr int16_t kRightEyeX = 168;
-  constexpr int16_t kEyeY = 167;
-
-  // Solid cyan shapes are the entire speaking character. The pair moves
-  // through the reference library's pill, focus, squint, and asymmetric
-  // silhouettes without pupils, a mouth, a body, or a greeting label.
-  drawRoboEye(display_, kLeftEyeX, kEyeY + pose.leftY, pose.leftWidth,
-              pose.leftHeight, true, pose.leftShape);
-  drawRoboEye(display_, kRightEyeX, kEyeY + pose.rightY, pose.rightWidth,
-              pose.rightHeight, false, pose.rightShape);
+  face_.setEmotion(emotion_);
+  face_.drawEyes(display_, millis(), kBackground);
 }
 
 void BuntyAnimations::beginSleeping(uint32_t now) {
@@ -282,47 +228,10 @@ void BuntyAnimations::drawWakeFrame() {
 }
 
 void BuntyAnimations::drawSpeakingMouth(uint8_t openness) {
-  if (openness > 100) openness = 100;
-
-  // Repaint only the mouth band so the eyes above keep their own frame timing.
-  display_.fillRect(kMouthBandLeft, kMouthBandTop, kMouthBandWidth,
-                    kMouthBandHeight, kBackground);
-
-  const int16_t gap =
-      kMouthMinGap +
-      static_cast<int16_t>((kMouthMaxGap - kMouthMinGap) * openness / 100);
-
-  // Two parabolic arcs meeting at the corners: a lens that widens with
-  // loudness. Drawn as short stroked segments to stay in the same geometric
-  // line vocabulary as the eyes rather than becoming a filled blob.
-  int16_t previousX = kMouthCenterX - kMouthHalfWidth;
-  int16_t previousUpper = kMouthCenterY;
-  int16_t previousLower = kMouthCenterY;
-  for (int16_t segment = 1; segment <= kMouthSegments; ++segment) {
-    const int16_t x = kMouthCenterX - kMouthHalfWidth +
-                      (2 * kMouthHalfWidth * segment) / kMouthSegments;
-    // Normalised to -100..100 across the mouth; the parabola is 0 at the
-    // corners and full height at the centre.
-    const int32_t offsetFromCentre =
-        (static_cast<int32_t>(x - kMouthCenterX) * 100) / kMouthHalfWidth;
-    const int32_t bow =
-        (100 * 100 - offsetFromCentre * offsetFromCentre) / 100;
-    const int16_t spread = static_cast<int16_t>(gap * bow / 100);
-    const int16_t upper = kMouthCenterY - spread;
-    const int16_t lower = kMouthCenterY + spread;
-    for (int16_t stroke = 0; stroke < kMouthStroke; ++stroke) {
-      display_.drawLine(previousX, previousUpper + stroke, x, upper + stroke,
-                        kEyeCyan);
-      display_.drawLine(previousX, previousLower - stroke, x, lower - stroke,
-                        kEyeCyan);
-    }
-    previousX = x;
-    previousUpper = upper;
-    previousLower = lower;
-  }
-
-  display_.present(kMouthBandLeft, kMouthBandTop, kMouthBandWidth,
-                   kMouthBandHeight);
+  face_.setEmotion(emotion_);
+  const Face::Rect area =
+      face_.drawMouth(display_, (openness > 100 ? 100 : openness) / 100.0f, millis(), kBackground);
+  if (area.x1 > area.x0) display_.present(area.x0, area.y0, area.x1 - area.x0, area.y1 - area.y0);
 }
 
 void BuntyAnimations::drawWakeIcon(const char *label) {

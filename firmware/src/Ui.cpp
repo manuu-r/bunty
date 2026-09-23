@@ -389,27 +389,29 @@ void showSyncing(bool failed) {
   panel.present();
 }
 
-bool settingsControlAt(int16_t x, int16_t y) { return x >= 4 && x < 60 && y >= 270 && y < 320; }
-bool voiceControlAt(int16_t x, int16_t y) { return x >= 180 && x < 236 && y >= 270 && y < 320; }
+// Touch targets reach well past the drawn buttons, up into the space above
+// and in toward the middle: a fingertip on a 2" panel lands imprecisely.
+bool settingsControlAt(int16_t x, int16_t y) { return x < 96 && y >= 250; }
+bool voiceControlAt(int16_t x, int16_t y) { return x >= 144 && y >= 250; }
 
 void drawControls() {
-  panel.fillRect(0, 270, kScreenWidth, 50, kBackground);
-  for (int x : {4, 180}) panel.fillRoundRect(x, 272, 56, 46, 10, kSurface);
+  panel.fillRect(0, 266, kScreenWidth, 54, kBackground);
+  for (int x : {2, 170}) panel.fillRoundRect(x, 268, 68, 50, 12, kSurface);
 
   // Three sliders. A gear at this size came out as two concentric circles,
   // which reads as a map pin rather than settings.
   for (uint8_t row = 0; row < 3; ++row) {
-    const int16_t y = 285 + row * 10;
-    panel.drawFastHLine(18, y, 28, kText);
-    panel.fillCircle(row == 1 ? 38 : 26, y, 3, kText);
+    const int16_t y = 283 + row * 10;
+    panel.drawFastHLine(20, y, 32, kText);
+    panel.fillCircle(row == 1 ? 42 : 29, y, 3, kText);
   }
 
   // Microphone: capsule, arc, stem, base.
-  panel.fillRoundRect(204, 280, 9, 18, 4, kText);
-  panel.drawCircleHelper(208, 294, 10, 0x8, kText);
-  panel.drawCircleHelper(209, 294, 10, 0x4, kText);
-  panel.drawFastVLine(208, 304, 6, kText);
-  panel.drawFastHLine(202, 310, 13, kText);
+  panel.fillRoundRect(199, 277, 10, 20, 5, kText);
+  panel.drawCircleHelper(203, 293, 11, 0x8, kText);
+  panel.drawCircleHelper(204, 293, 11, 0x4, kText);
+  panel.drawFastVLine(203, 304, 7, kText);
+  panel.drawFastHLine(196, 311, 15, kText);
 }
 
 }  // namespace ui

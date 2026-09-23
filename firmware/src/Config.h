@@ -63,6 +63,8 @@ constexpr uint32_t kBacklightPwmHz = 12000;
 // A faint ~3% PWM glow: enough to see the sleeping eyes and know Bunty is on
 // without lighting the room or desk.
 constexpr uint8_t kSleepBacklightDuty = 8;
+// Temporary bench check: at boot, show each emotion's face for 5 s, forever.
+constexpr bool kFaceDemo = false;
 
 constexpr uint16_t kBackground = rgb565(6, 8, 15);
 constexpr uint16_t kSurface = rgb565(17, 21, 33);
@@ -80,8 +82,6 @@ namespace servo {
 constexpr bool kEnabled = true;
 // Temporary bench check: at boot, sweep yaw then pitch fast, then home.
 constexpr bool kBootDemo = false;
-// Head gestures between dashboard pages.
-constexpr bool kPageSweep = true;
 constexpr float kBootDemoDegreesPerSecond = 360.0f;
 constexpr float kBootDemoSweepDegrees = 70.0f;
 constexpr bool kTurnEnabled = true;
@@ -94,11 +94,10 @@ constexpr uint8_t kTurnHomeAngle = 100;
 // matching targets make Bunty look right/up, then left/down, in one gesture.
 // Flip this calibration value later if the physical linkage is reversed.
 constexpr uint8_t kTiltHomeAngle = 100;
-// Bunty looks this far to each side of home before a new dashboard page.
+// A calibrated home must leave this much travel either side of it.
 constexpr float kSweepDegrees = 40.0f;
-// A full 100 -> 140 -> 60 -> 100 sweep is 160 degrees of travel. A conservative
-// rate keeps the 50 Hz position changes below half a degree, avoiding visible
-// stepping in small hobby servos while still completing inside the page dwell.
+// Default glide rate for ordinary moves: slow enough that 50 Hz position
+// updates stay under half a degree, avoiding visible stepping in hobby servos.
 constexpr float kSweepDegreesPerSecond = 30.0f;
 }  // namespace servo
 
@@ -162,6 +161,8 @@ static_assert(kBaseMilliamps + kBacklightMilliamps + 2 * kServoMilliamps >
 
 // Quarter-dBm; 52 is 13 dBm, roughly halving the TX burst the reserve covers.
 constexpr int8_t kWifiTxPowerQuarterDbm = 52;
+// Streaming voice uplink needs more; 68 is 17 dBm.
+constexpr int8_t kVoiceTxPowerQuarterDbm = 68;
 
 // APB stays at 80 MHz across these, so servo LEDC and display SPI are unaffected.
 constexpr uint32_t kIdleAfterMs = 1500;
@@ -252,15 +253,16 @@ constexpr int kMicShift = 13;
 // A slot is treated as unwired once its energy falls below 1/8 of the other's;
 // otherwise the two mics are averaged, which lowers uncorrelated noise.
 constexpr uint32_t kMicSlotRatio = 8;
-constexpr size_t kCaptureRingBytes = 320000;  // 10 s: covers TLS + Flux setup
+constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow TLS + Flux setup
 
 constexpr uint8_t kVolumePercent = 70;
 constexpr int kSpeakerDmaBuffers = 4;
 constexpr int kSpeakerDmaFrames = 240;
 constexpr uint32_t kSpeakerDrainMs =
     kSpeakerDmaBuffers * kSpeakerDmaFrames * 1000 / kSampleRate + 30;
-// Aura streams sentences faster than real time. 1 MB is ~32 s of reply.
-constexpr size_t kPlaybackRingBytes = 1024 * 1024;
+// Aura streams faster than real time; when this fills, the socket simply
+// stops reading and TCP holds the rest at the gateway. ~12 s of reply.
+constexpr size_t kPlaybackRingBytes = 384 * 1024;
 // Jitter cushion before the first sample, and again after any underrun.
 constexpr size_t kPrebufferBytes = kSampleRate * 2 * 120 / 1000;
 // Output RMS that reads as "fully open" for the mouth and the dance.
@@ -286,9 +288,11 @@ constexpr uint32_t kSilenceExitMs = 8000;
 constexpr uint32_t kLocalSpeechGraceMs = 3000;
 constexpr uint32_t kLocalSpeechHoldMs = 600;
 
-constexpr uint32_t kConnectTimeoutMs = 12000;
+constexpr uint32_t kConnectTimeoutMs = 20000;
 constexpr uint32_t kReplyTimeoutMs = 30000;
 constexpr uint32_t kCompleteTimeoutMs = 5000;
+// IDF drops the connection when a write times out, so give a slow uplink room.
+constexpr uint32_t kSendTimeoutMs = 5000;
 constexpr uint8_t kMaxConsecutiveFailures = 3;
 constexpr uint32_t kRetryDelayMs = 800;
 
@@ -303,18 +307,35 @@ constexpr uint32_t kWaveformFullScaleRms = 1500;
 
 // ----------------------------------------------------------------- dance ---
 
-// Bunty's head while it talks: tilt nods on syllables, yaw sweeps with phrases.
+// Bunty's head while it talks is driven by the emotion of the sentence being
+// spoken, not by the sound: each emotion is a gesture pattern of yaw and tilt
+// oscillation around a leaning rest pose.
 namespace dance {
-constexpr float kNodDegrees = 14.0f;      // tilt kick on a syllable onset
-constexpr float kLiftDegrees = 8.0f;      // tilt raised by sustained loudness
-constexpr float kSweepDegrees = 26.0f;    // yaw half-arc at full loudness
-constexpr float kSweepHz = 0.45f;         // yaw sweep rate at full loudness
-constexpr float kAccentDegrees = 6.0f;    // yaw flick on a strong onset
-constexpr float kMaxDegreesPerSecond = 160.0f;
-constexpr float kListenTiltDegrees = 7.0f;   // curious head cock while listening
-constexpr float kThinkTurnDegrees = -12.0f;  // glance aside while thinking
-constexpr float kThinkTiltDegrees = 6.0f;
-constexpr float kPoseDegreesPerSecond = 40.0f;
+// Smooth patterns glide on a sine; snappy ones jump between the two extremes
+// as fast as `rate` allows and hold there.
+struct Style {
+  float yawAmplitude, yawHz, tiltAmplitude, tiltHz;  // degrees, cycles per second
+  float tilt, yaw;                                   // rest pose offsets, degrees
+  float rate;                                        // top speed, degrees per second
+  float snap;                                        // 0 smooth .. 1 snappy
+};
+// Indexed by Emotion.
+constexpr Style kStyles[] = {
+    {40.0f, 0.40f, 15.0f, 0.80f, 0.0f, 0.0f, 300.0f, 0.0f},      // neutral
+    {25.0f, 0.25f, 10.0f, 0.35f, -10.0f, 0.0f, 120.0f, 0.0f},    // soft: slow sway, head low
+    {50.0f, 0.60f, 22.0f, 1.60f, 12.0f, 0.0f, 450.0f, 0.0f},     // happy: bouncy, head up
+    {70.0f, 1.00f, 28.0f, 2.20f, 8.0f, 0.0f, 650.0f, 0.2f},      // excited: big and fast
+    {35.0f, 1.50f, 20.0f, 2.00f, -18.0f, 0.0f, 650.0f, 1.0f},    // angry: sharp head jerks
+    {18.0f, 0.18f, 8.0f, 0.25f, -25.0f, 0.0f, 70.0f, 0.0f},      // sad: slow, low, still
+    {25.0f, 0.30f, 14.0f, 0.45f, 20.0f, 30.0f, 150.0f, 0.0f},    // curious: head cocked
+    {45.0f, 0.80f, 15.0f, 0.80f, 18.0f, -25.0f, 550.0f, 0.7f},   // sassy: chin up, flicks
+};
+// Fraction of the way to a new style per tick: about 300 ms to settle.
+constexpr float kStyleBlend = 0.07f;
+constexpr float kListenTiltDegrees = 15.0f;   // curious head cock while listening
+constexpr float kThinkTurnDegrees = -30.0f;  // glance aside while thinking
+constexpr float kThinkTiltDegrees = 12.0f;
+constexpr float kPoseDegreesPerSecond = 90.0f;
 constexpr uint32_t kTickMs = 20;
 }  // namespace dance
 

@@ -2,19 +2,20 @@
 
 #include <Arduino.h>
 
+#include "Config.h"
+#include "Emotion.h"
 #include "ServoMotion.h"
 #include "Voice.h"
 
 // Bunty's head during a conversation. It cocks its head while listening,
-// glances aside while thinking, and while speaking the tilt servo nods on each
-// syllable onset as the yaw servo sweeps through phrases, both scaled by the
-// loudness actually reaching the speaker. Back home when the conversation ends.
+// glances aside while thinking, and while speaking performs the gesture
+// pattern of the current sentence's emotion. Back home when it ends.
 class Dance {
  public:
   void attach(ServoMotion *turn, uint8_t turnHome, ServoMotion *tilt,
               uint8_t tiltHome);
   // Call from loop(); paces itself. The servos are Dance's while active().
-  void service(Voice::Phase phase, float level, uint32_t now);
+  void service(Voice::Phase phase, Emotion emotion, uint32_t now);
   bool active() const { return claimed_; }
 
  private:
@@ -29,11 +30,7 @@ class Dance {
   uint32_t lastTickAt_ = 0;
   uint32_t homingSince_ = 0;
 
-  float fast_ = 0.0f;
-  float slow_ = 0.0f;
-  float sweepPhase_ = 0.0f;
-  float accent_ = 0.0f;
-  float accentSign_ = 1.0f;
-  bool onsetArmed_ = true;
-  uint32_t lastAccentAt_ = 0;
+  cfg::dance::Style style_ = cfg::dance::kStyles[0];
+  float yawPhase_ = 0.0f;
+  float tiltPhase_ = 0.0f;
 };

@@ -49,14 +49,6 @@ constexpr uint32_t kGreetingMs = 2500;
 bool greetingEyesShown = false;
 uint32_t greetingEndsAt = 0;
 
-// Bunty glances left and right before swapping the dashboard page, so a page
-// change reads as a deliberate gesture rather than a silent redraw.
-enum class SweepPhase : uint8_t { Idle, Right, Left, Home };
-SweepPhase sweepPhase = SweepPhase::Idle;
-// Which servos the power budget granted for the sweep in progress.
-bool sweepTurnClaimed = false;
-bool sweepTiltClaimed = false;
-
 wl_status_t lastWifiStatus = WL_NO_SHIELD;
 
 Microphone microphone;
@@ -230,67 +222,6 @@ void forgetPairing() {
   ESP.restart();
 }
 
-// Returns true once the sweep has completed and the caller may redraw. Driven
-// from loop() rather than blocking, so the display keeps running through
-// the gesture.
-bool servicePageSweep() {
-  static bool preferTilt = false;
-  if (!cfg::servo::kPageSweep || (!turnServoReady && !tiltServoReady)) return true;
-  if (dance.active()) return true;
-
-  const bool moving = (turnServoReady && turnServo.moving()) ||
-                      (tiltServoReady && tiltServo.moving());
-  const auto moveBoth = [](float turnAngle, float tiltAngle) {
-    if (sweepTurnClaimed) turnServo.moveTo(turnAngle);
-    if (sweepTiltClaimed) tiltServo.moveTo(tiltAngle);
-  };
-  const auto releaseSweep = []() {
-    if (sweepTurnClaimed && power::held(power::Load::kTurnServo)) {
-      power::release(power::Load::kTurnServo);
-    }
-    if (sweepTiltClaimed && power::held(power::Load::kTiltServo)) {
-      power::release(power::Load::kTiltServo);
-    }
-    sweepTurnClaimed = sweepTiltClaimed = false;
-  };
-
-  switch (sweepPhase) {
-    case SweepPhase::Idle: {
-      // The rail allows one motor. Alternate complete gestures instead of
-      // always granting yaw first and starving pitch on every page.
-      sweepTurnClaimed = sweepTiltClaimed = false;
-      const bool useTilt = tiltServoReady && (preferTilt || !turnServoReady);
-      if (useTilt) sweepTiltClaimed = power::claim(power::Load::kTiltServo);
-      else if (turnServoReady) sweepTurnClaimed = power::claim(power::Load::kTurnServo);
-      if (sweepTurnClaimed || sweepTiltClaimed) preferTilt = !useTilt;
-      if (!sweepTurnClaimed && !sweepTiltClaimed) return true;
-      turnServo.setSpeed(power::servoSpeed(cfg::servo::kSweepDegreesPerSecond));
-      tiltServo.setSpeed(power::servoSpeed(cfg::servo::kSweepDegreesPerSecond));
-      sweepPhase = SweepPhase::Right;
-      moveBoth(turnHome + cfg::servo::kSweepDegrees,
-               tiltHome + cfg::servo::kSweepDegrees);
-      return false;
-    }
-    case SweepPhase::Right:
-      if (moving) return false;
-      sweepPhase = SweepPhase::Left;
-      moveBoth(turnHome - cfg::servo::kSweepDegrees,
-               tiltHome - cfg::servo::kSweepDegrees);
-      return false;
-    case SweepPhase::Left:
-      if (moving) return false;
-      sweepPhase = SweepPhase::Home;
-      moveBoth(turnHome, tiltHome);
-      return false;
-    case SweepPhase::Home:
-      if (moving) return false;
-      releaseSweep();
-      sweepPhase = SweepPhase::Idle;
-      return true;
-  }
-  return true;
-}
-
 enum class Overlay : uint8_t { kNone, kSettings, kConfirmUnpair, kConfirmDisconnect };
 Overlay overlay = Overlay::kNone;
 
@@ -431,6 +362,7 @@ void showVoiceFace(uint32_t now) {
 
 void hideVoiceFace() {
   voiceFaceShown = false;
+  memory::report();  // the peak of a whole conversation, while it's fresh
   touch::flush();
   lastInteractionAt = millis();
   const char *error = voice.lastError();
@@ -445,6 +377,8 @@ void hideVoiceFace() {
 // that opens with the reply actually reaching the speaker.
 void serviceVoiceFace(uint32_t now) {
   const Voice::Phase phase = voice.phase();
+  animations->setEmotion(phase == Voice::Phase::Speaking ? voice.emotion()
+                                                         : Emotion::Neutral);
   if (phase != shownPhase) {
     const bool wasSpeaking = shownPhase == Voice::Phase::Speaking;
     shownPhase = phase;
@@ -480,7 +414,7 @@ void serviceVoiceFace(uint32_t now) {
 // Returns true while the conversation owns the screen and touch.
 bool serviceVoice() {
   const uint32_t now = millis();
-  dance.service(voice.phase(), voice.outputLevel(), now);
+  dance.service(voice.phase(), voice.emotion(), now);
   if (!voice.active()) {
     if (voiceFaceShown) hideVoiceFace();
     return false;
@@ -564,14 +498,9 @@ void serviceRuntime() {
     dashboard::render();
   }
 
-  if (displayState == DisplayState::Dashboard && !conversing && !dance.active() &&
-      dashboard::pageDue()) {
-    // The page waits for the glance to finish; render() then restarts the page
-    // timer, so the next sweep is a full interval away.
-    if (servicePageSweep()) {
-      dashboard::nextPage();
-      dashboard::render();
-    }
+  if (displayState == DisplayState::Dashboard && !conversing && dashboard::pageDue()) {
+    dashboard::nextPage();
+    dashboard::render();
   }
 }
 
@@ -592,6 +521,36 @@ void runServoDemo() {
   step(tiltServo, tiltServoReady, tiltHome);
   logPrintf("[servo] parked at home: turn %u, tilt %u\n", turnHome, tiltHome);
   for (;;) delay(1000);
+}
+
+// Bench check for cfg::ui::kFaceDemo: every emotion's face, five seconds each.
+void runFaceDemo() {
+  static const char *const kNames[] = {
+      "NEUTRAL", "SOFT", "HAPPY", "EXCITED", "ANGRY", "SAD", "CURIOUS", "SASSY",
+  };
+  ui::fadeBacklight(true);
+  for (uint8_t index = 0;; index = (index + 1) % uint8_t(Emotion::Count)) {
+    logPrintf("[demo] %s\n", kNames[index]);
+    const uint32_t start = millis();
+    {
+      ui::Guard guard;
+      ui::display().clear(cfg::ui::kBackground);
+      animations->setEmotion(static_cast<Emotion>(index));
+      animations->beginSpeaking(start, false);
+      ui::drawTopBar(false);
+      ui::display().present();
+      animations->drawWakeIcon(kNames[index]);
+    }
+    while (millis() - start < 5000) {
+      const uint32_t now = millis();
+      // A stand-in speech envelope, so the mouth moves as it would in a reply.
+      const float wave = fabsf(sinf(now * 0.012f)) * (0.5f + 0.5f * sinf(now * 0.003f));
+      ui::Guard guard;
+      animations->serviceSpeaking(now);
+      animations->drawSpeakingMouth(static_cast<uint8_t>(wave * 100.0f));
+      delay(20);
+    }
+  }
 }
 
 void setupServos() {
@@ -666,6 +625,7 @@ void setup() {
                 static_cast<unsigned>(ESP.getFreeHeap()),
                 static_cast<unsigned>(ESP.getPsramSize()));
 
+  if (cfg::ui::kFaceDemo) runFaceDemo();
   setupServos();
 
   // The amp idles shut down; the speaker wakes it only for a reply.
@@ -726,6 +686,14 @@ void loop() {
   if (greetingEyesShown && static_cast<int32_t>(now - greetingEndsAt) < 0) {
     ui::Guard guard;
     animations->serviceSpeaking(now);
+  }
+
+  // Heap and task-stack headroom: once shortly after boot, then every 5 min.
+  memory::sampleTask("loop");
+  static uint32_t nextMemoryReportAt = 30000;
+  if (static_cast<int32_t>(now - nextMemoryReportAt) >= 0) {
+    nextMemoryReportAt = now + 5 * 60 * 1000;
+    memory::report();
   }
   delay(8);
 }

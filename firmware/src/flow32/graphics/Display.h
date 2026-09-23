@@ -55,6 +55,13 @@ public:
   void fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r,
                      uint16_t color);
 
+  /**
+   * Copies `count` finished pixels into row `y` starting at `x`, clipped to
+   * the panel. For renderers that compute a whole row at a time: one pass,
+   * without drawPixel's per-pixel read-compare-write.
+   */
+  void writeRow(int16_t x, int16_t y, const uint16_t *colors, int16_t count);
+
 private:
   size_t bufferBytes() const;
   void blendPixel(int16_t x, int16_t y, uint16_t fg, uint8_t cover4);

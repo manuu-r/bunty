@@ -84,8 +84,10 @@ bool Voice::begin(Microphone *microphone, const char *token, const char *session
       static_cast<uint8_t *>(memory::external(cfg::audio::kPlaybackRingBytes + 1));
   text_ = static_cast<char *>(memory::external(kControlBytes + 1));
   arenaStorage_ = static_cast<uint8_t *>(memory::external(kArenaBytes));
+  frame_ = static_cast<uint8_t *>(memory::external(kUploadFrameBytes));
   events_ = xQueueCreate(24, sizeof(Event));
-  if (!playbackStorage || !text_ || !arenaStorage_ || !events_) {
+  cues_ = xQueueCreate(16, sizeof(Cue));
+  if (!playbackStorage || !text_ || !arenaStorage_ || !frame_ || !events_ || !cues_) {
     Serial.println("[voice] could not allocate voice buffers");
     return false;
   }
@@ -162,6 +164,7 @@ void Voice::nextTurn(uint32_t now) {
   microphone_->discard();
   microphone_->setCapturing(true);
   retryAt_ = now;
+  speechPending_ = false;
   setPhase(Phase::Connecting);
   phaseSince_ = now;
 }
@@ -206,19 +209,20 @@ void Voice::step(uint32_t now) {
 
   switch (phase) {
     case Phase::Connecting:
-      if (silenceExpired(now)) {
-        endConversation("8 s of silence", false);
-        return;
-      }
       if (!client_) {
-        if (static_cast<int32_t>(now - retryAt_) < 0 || !clockTrusted()) {
+        if (static_cast<int32_t>(now - retryAt_) < 0) return;
+        // Wait for a voice before spending a transcription session on silence.
+        // The microphone keeps filling its ring, so nothing said is lost.
+        if (!speechPending_) return;
+        if (!clockTrusted()) {
           if (now - phaseSince_ > kConnectTimeoutMs) fail("clock not synchronized", now);
           return;
         }
+        connectingSince_ = now;
         if (!openSocket()) fail("could not open socket", now);
         return;
       }
-      if (now - phaseSince_ > kConnectTimeoutMs) fail("no session.ready", now);
+      if (now - connectingSince_ > kConnectTimeoutMs) fail("no session.ready", now);
       return;
 
     case Phase::Listening:
@@ -268,6 +272,8 @@ void Voice::handle(const Event &event, uint32_t now) {
     case EventKind::Ready:
       if (phase != Phase::Connecting) return;
       socketReady_ = true;
+      // Connecting is Bunty's wait, not the user's silence.
+      lastActivityAt_ += now - connectingSince_;
       logPrintf("[voice] session ready; streaming (%u ms buffered)\n",
                 unsigned(microphone_->buffered() / 32));
       setPhase(Phase::Listening);
@@ -341,6 +347,13 @@ void Voice::trackLocalSpeech(uint32_t now) {
   const uint32_t level = microphone_->level();
   const uint32_t threshold = noiseFloor_ * 3 > 300 ? noiseFloor_ * 3 : 300;
   if (level > threshold) {
+    if (lastLocalSpeechAt_ != 0 && now - lastLocalSpeechAt_ < kLocalSpeechHoldMs &&
+        !speechPending_) {
+      // Two loud frames in a row: a voice, not a single knock or click.
+      speechPending_ = true;
+      logPrintf("[voice] speech heard (level %u over %u); opening socket\n",
+                unsigned(level), unsigned(threshold));
+    }
     lastLocalSpeechAt_ = now;
   } else {
     noiseFloor_ = (noiseFloor_ * 63 + level) / 64;
@@ -359,17 +372,20 @@ void Voice::upload() {
   if (!client_ || !socketReady_) return;
   // Bounded per pass so gateway events are never starved by a backlog.
   for (int frames = 0; frames < 8; ++frames) {
-    if (microphone_->buffered() < sizeof(frame_)) return;
+    if (microphone_->buffered() < kUploadFrameBytes) return;
     size_t filled = 0;
-    while (filled < sizeof(frame_)) {
-      const size_t got = microphone_->read(frame_ + filled, sizeof(frame_) - filled, 0);
+    while (filled < kUploadFrameBytes) {
+      const size_t got = microphone_->read(frame_ + filled, kUploadFrameBytes - filled, 0);
       if (got == 0) break;
       filled += got;
     }
-    if (filled != sizeof(frame_)) return;
+    if (filled != kUploadFrameBytes) return;
     const int sent = esp_websocket_client_send_bin(
-        client_, reinterpret_cast<const char *>(frame_), int(filled), pdMS_TO_TICKS(1000));
+        client_, reinterpret_cast<const char *>(frame_), int(filled), pdMS_TO_TICKS(kSendTimeoutMs));
     if (sent != int(filled)) {
+      logPrintf("[voice] send_bin returned %d of %u (connected=%d, backlog=%u)\n", sent,
+                unsigned(filled), int(esp_websocket_client_is_connected(client_)),
+                unsigned(microphone_->buffered()));
       fail("audio upload stalled", millis());
       return;
     }
@@ -521,8 +537,13 @@ void Voice::onText(const char *text, size_t length) {
     // Set here, before the first PCM frame is handed to onAudio.
     audioEnded_ = false;
     drained_ = false;
+    emotion_ = Emotion::Neutral;
     playing_ = true;
     post(EventKind::AudioStart);
+  } else if (strcmp(type, "emotion") == 0) {
+    const Cue cue{bytesIn_, parseEmotion(document["name"] | "neutral")};
+    if (xQueueSend(cues_, &cue, 0) != pdTRUE) emotion_ = cue.emotion;
+    logPrintf("[voice] feeling %s\n", document["name"] | "neutral");
   } else if (strcmp(type, "audio.end") == 0) {
     audioEnded_ = true;
     post(EventKind::AudioEnd);
@@ -540,7 +561,10 @@ void Voice::onAudio(const uint8_t *data, size_t length) {
   size_t sent = 0;
   // Aura outruns real time; blocking here is TCP backpressure, not loss.
   while (sent < length && playing_ && generation == generation_) {
-    sent += xStreamBufferSend(playback_, data + sent, length - sent, pdMS_TO_TICKS(100));
+    const size_t chunk =
+        xStreamBufferSend(playback_, data + sent, length - sent, pdMS_TO_TICKS(100));
+    sent += chunk;
+    bytesIn_ += chunk;
   }
 }
 
@@ -571,7 +595,12 @@ void Voice::playOnce() {
     outputLevel_ = 0.0f;
     if (flush_.exchange(false)) {
       uint8_t scratch[512];
-      while (xStreamBufferReceive(playback_, scratch, sizeof(scratch), 0) > 0) {
+      size_t dropped;
+      while ((dropped = xStreamBufferReceive(playback_, scratch, sizeof(scratch), 0)) > 0) {
+        bytesOut_ += dropped;
+      }
+      Cue stale;
+      while (xQueueReceive(cues_, &stale, 0) == pdTRUE) {
       }
     }
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -612,11 +641,20 @@ void Voice::playOnce() {
   if (got & 1) {
     // Chunks arrive at arbitrary byte boundaries; complete the split sample.
     got += xStreamBufferReceive(playback_, bytes + got, 1, pdMS_TO_TICKS(100));
-    if (got & 1) --got;
   }
+  bytesOut_ += got;
+  got &= ~size_t(1);
   if (got == 0) {
     primed = false;  // underrun between sentences: re-cushion before resuming
     return;
+  }
+  // A cue fires with the chunk its sentence starts in. Compared by
+  // difference so the byte counters may wrap.
+  Cue cue;
+  while (xQueuePeek(cues_, &cue, 0) == pdTRUE &&
+         static_cast<int32_t>(cue.position - bytesOut_) < 0) {
+    xQueueReceive(cues_, &cue, 0);
+    emotion_ = cue.emotion;
   }
   const size_t count = got / 2;
   float energy = 0.0f;

@@ -29,7 +29,7 @@ void reportMemory();
 bool serviceFetch();
 
 // True once the current page's dwell has elapsed. The caller decides whether
-// the moment is right to advance (Bunty glances aside first).
+// the moment is right to advance.
 bool pageDue();
 void nextPage();
 

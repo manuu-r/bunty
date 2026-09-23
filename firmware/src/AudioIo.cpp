@@ -15,6 +15,10 @@ using namespace cfg::audio;
 constexpr size_t kReadFrames = kSampleRate / 50;  // 20 ms
 constexpr size_t kChunkFrames = 128;
 
+// Energy is tracked as 4096 x mean square. -12 dBFS sustained, in the
+// post-shift domain where full scale is 2^18, marks a slot as noise.
+constexpr uint64_t kBrokenSlotEnergy = 4096ull * 65536ull * 65536ull;
+
 int16_t clip16(int32_t value) {
   if (value > INT16_MAX) return INT16_MAX;
   if (value < INT16_MIN) return INT16_MIN;
@@ -49,7 +53,7 @@ bool Microphone::begin() {
   config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
   config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  config.dma_buf_count = 8;
+  config.dma_buf_count = 6;
   config.dma_buf_len = 160;
   if (i2s_driver_install(cfg::kMicrophonePort, &config, 0, nullptr) != ESP_OK) {
     Serial.println("[mic] could not install the I2S driver");
@@ -93,6 +97,15 @@ void Microphone::task(void *context) {
 void Microphone::readOnce() {
   static int32_t slots[kReadFrames * 2];
   static int16_t mono[kReadFrames];
+  // Which capsules are actually wired, reported only when it changes.
+  static int8_t reportedSlots = -1;
+  const int8_t slots_ = int8_t((energyLeft_ > kBrokenSlotEnergy ? 1 : 0) |
+                                (energyRight_ > kBrokenSlotEnergy ? 2 : 0));
+  if (slots_ != reportedSlots) {
+    reportedSlots = slots_;
+    logPrintf("[mic] left slot %s, right slot %s\n",
+              (slots_ & 1) ? "NOISE (ignored)" : "ok", (slots_ & 2) ? "NOISE (ignored)" : "ok");
+  }
   size_t bytesRead = 0;
   if (i2s_read(cfg::kMicrophonePort, slots, sizeof(slots), &bytesRead,
                pdMS_TO_TICKS(100)) != ESP_OK || bytesRead == 0) {
@@ -105,8 +118,17 @@ void Microphone::readOnce() {
     // Slowly tracked per-slot energy decides which capsules are really wired.
     energyLeft_ += uint64_t(int64_t(left) * left) - (energyLeft_ >> 12);
     energyRight_ += uint64_t(int64_t(right) * right) - (energyRight_ >> 12);
+    // An undriven slot (a mic whose L/R strap floats or matches the other's)
+    // reads as bus noise near full scale; real room audio never sits there.
+    const bool leftBroken = energyLeft_ > kBrokenSlotEnergy;
+    const bool rightBroken = energyRight_ > kBrokenSlotEnergy;
     int32_t mixed;
-    if (energyLeft_ * kMicSlotRatio < energyRight_) mixed = right;
+    if (leftBroken && !rightBroken) mixed = right;
+    else if (rightBroken && !leftBroken) mixed = left;
+    // Loud speech can push the real mic over the line too; bus noise is still
+    // the louder of the two.
+    else if (leftBroken && rightBroken) mixed = energyLeft_ < energyRight_ ? left : right;
+    else if (energyLeft_ * kMicSlotRatio < energyRight_) mixed = right;
     else if (energyRight_ * kMicSlotRatio < energyLeft_) mixed = left;
     else mixed = (left + right) / 2;
     mono[i] = clip16(mixed);

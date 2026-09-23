@@ -60,7 +60,7 @@ class ServoMotion {
   static constexpr uint32_t kUpdateIntervalMs = 20;
   static constexpr float kDefaultDegreesPerSecond = 20.0f;
   static constexpr float kMinimumMoveMs = 220.0f;
-  static constexpr float kFollowTimeConstantMs = 60.0f;
+  static constexpr float kFollowTimeConstantMs = 25.0f;
 
   void writeAngle(float angle);
 

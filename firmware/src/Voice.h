@@ -9,15 +9,18 @@
 
 #include "AudioIo.h"
 #include "Config.h"
+#include "Emotion.h"
 #include "Memory.h"
 
 // Hands-free conversation with the IoT gateway's /v1/live pipeline
 // (Flux STT -> Claude -> Aura TTS).
 //
 // A tap starts conversation mode. Each turn is its own WebSocket, because the
-// gateway closes the socket once a reply has played: Bunty opens it straight
-// away, streams the microphone continuously, and lets Flux and Smart Turn
-// decide when the user has finished. The reply arrives as raw 16 kHz linear16
+// gateway closes the socket once a reply has played. The microphone records
+// into a ring from the moment of the tap, but the socket only opens once local
+// speech is heard, so no quiet time is streamed or billed; the ring is then
+// flushed so the opening words survive. Flux and Smart Turn decide when the
+// user has finished. The reply arrives as raw 16 kHz linear16
 // PCM, whatever the `encoding` label on audio.start says. After the speaker
 // drains, Bunty acknowledges playback and opens the next turn. Eight seconds
 // without anyone talking ends conversation mode.
@@ -48,6 +51,8 @@ class Voice {
 
   // Loudness of what the speaker is playing right now, 0 (silent) to ~1.
   float outputLevel() const { return outputLevel_; }
+  // The feeling of the sentence currently coming out of the speaker.
+  Emotion emotion() const { return emotion_; }
   uint32_t inputLevel() const { return microphone_ ? microphone_->level() : 0; }
 
   // A short reason the last conversation ended abnormally, or "" if it didn't.
@@ -112,6 +117,18 @@ class Voice {
   std::atomic<bool> flush_{false};
   std::atomic<float> outputLevel_{0.0f};
 
+  // Emotion cues keyed to a byte position in the reply stream. The socket
+  // task counts bytes in, `speak` counts bytes out, and a cue takes effect
+  // when its sentence's first sample reaches the speaker.
+  struct Cue {
+    uint32_t position;
+    Emotion emotion;
+  };
+  QueueHandle_t cues_ = nullptr;
+  std::atomic<uint32_t> bytesIn_{0};
+  uint32_t bytesOut_ = 0;
+  std::atomic<Emotion> emotion_{Emotion::Neutral};
+
   // Socket-task reassembly of text frames split across data events.
   char *text_ = nullptr;
   size_t textUsed_ = 0;
@@ -123,13 +140,17 @@ class Voice {
 
   // Owned by `voice`.
   bool socketReady_ = false;
+  // Flux bills by audio duration, so the socket stays shut until the
+  // microphone hears something worth transcribing.
+  bool speechPending_ = false;
+  uint32_t connectingSince_ = 0;
   uint8_t failures_ = 0;
   uint32_t phaseSince_ = 0;
   uint32_t retryAt_ = 0;
   uint32_t lastActivityAt_ = 0;
   uint32_t lastLocalSpeechAt_ = 0;
   uint32_t noiseFloor_ = 200;
-  uint8_t frame_[cfg::voice::kUploadFrameBytes] = {};
+  uint8_t *frame_ = nullptr;  // one upload frame, in PSRAM
   const char *lastError_ = "";
   char uri_[96] = {};
   char headers_[320] = {};

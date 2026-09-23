@@ -3,6 +3,9 @@
 #include <Arduino.h>
 #include <stddef.h>
 
+#include "Emotion.h"
+#include "Face.h"
+
 class Display;
 
 // Owns every chunky cyan robo-eye emotion drawn below Bunty's persistent 32 px
@@ -17,11 +20,13 @@ class BuntyAnimations {
 
   // The first speaking frame can be composed into a larger full-screen frame.
   void beginSpeaking(uint32_t now, bool present = true);
+  // Speaking eyes and the mouth take this emotion's shapes and colour on
+  // their next frame.
+  void setEmotion(Emotion emotion) { emotion_ = emotion; }
   void serviceSpeaking(uint32_t now);
 
-  // A stroked vector mouth below the eyes. `openness` is 0-100 and is meant to
-  // track live speech loudness. Only the band the mouth can occupy is redrawn,
-  // so it composes over an existing speaking frame without disturbing the eyes.
+  // The mouth below the eyes. `openness` is 0-100 and tracks live speech
+  // loudness. Only the mouth band is redrawn, so it composes over the eyes.
   void drawSpeakingMouth(uint8_t openness);
 
   // A microphone glyph and phase label ("LISTENING", "THINKING") between the
@@ -51,4 +56,6 @@ class BuntyAnimations {
   uint32_t lastFrameAt_ = 0;
   uint32_t animationStartedAt_ = 0;
   uint8_t frame_ = 0;
+  Emotion emotion_ = Emotion::Neutral;
+  Face face_;
 };

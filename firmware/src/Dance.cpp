@@ -2,14 +2,20 @@
 
 #include <math.h>
 
-#include "Config.h"
 #include "Power.h"
 
 namespace {
 
 using namespace cfg::dance;
 
-float clamp01(float value) { return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value); }
+float blend(float current, float goal) { return current + (goal - current) * kStyleBlend; }
+
+// A sine that squares off as `snap` rises: 0 glides, 1 jumps and holds.
+float wave(float phase, float snap) {
+  const float sine = sinf(phase);
+  const float square = sine >= 0.0f ? 1.0f : -1.0f;
+  return sine + (square - sine) * snap;
+}
 
 }  // namespace
 
@@ -27,7 +33,7 @@ void Dance::aim(float turnOffset, float tiltOffset, float degreesPerSecond) {
   if (tilt_) tilt_->follow(tiltHome_ + tiltOffset, rate);
 }
 
-void Dance::service(Voice::Phase phase, float level, uint32_t now) {
+void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
   if (!turn_ && !tilt_) return;
   if (now - lastTickAt_ < kTickMs) return;
   const float dt = lastTickAt_ == 0 ? kTickMs / 1000.0f : (now - lastTickAt_) / 1000.0f;
@@ -44,7 +50,7 @@ void Dance::service(Voice::Phase phase, float level, uint32_t now) {
     if ((settled && now - homingSince_ > 100) || now - homingSince_ > 3000) {
       power::release(power::Load::kDance);
       claimed_ = homing_ = false;
-      fast_ = slow_ = accent_ = 0.0f;
+      style_ = kStyles[0];
     }
     return;
   }
@@ -54,12 +60,6 @@ void Dance::service(Voice::Phase phase, float level, uint32_t now) {
     if (!power::claim(power::Load::kDance)) return;
     claimed_ = true;
   }
-
-  // A fast envelope for syllables and a slow one for phrases; their gap is
-  // the onset that kicks a nod.
-  const float target = level;
-  fast_ += (target - fast_) * (target > fast_ ? 0.6f : 0.15f);
-  slow_ += (target - slow_) * 0.035f;
 
   switch (phase) {
     case Voice::Phase::Connecting:
@@ -76,24 +76,21 @@ void Dance::service(Voice::Phase phase, float level, uint32_t now) {
       return;
   }
 
-  const float loud = clamp01(slow_ * 1.4f);
-  const float onset = clamp01((fast_ - slow_ * 1.1f) * 2.5f);
+  // Glide between emotions rather than switching gesture in one jump. The
+  // phases keep running, so a new tempo picks up where the old one was.
+  const Style &goal = kStyles[static_cast<uint8_t>(emotion)];
+  style_.yawAmplitude = blend(style_.yawAmplitude, goal.yawAmplitude);
+  style_.yawHz = blend(style_.yawHz, goal.yawHz);
+  style_.tiltAmplitude = blend(style_.tiltAmplitude, goal.tiltAmplitude);
+  style_.tiltHz = blend(style_.tiltHz, goal.tiltHz);
+  style_.tilt = blend(style_.tilt, goal.tilt);
+  style_.yaw = blend(style_.yaw, goal.yaw);
+  style_.rate = blend(style_.rate, goal.rate);
+  style_.snap = blend(style_.snap, goal.snap);
 
-  // Strong onsets flick the yaw the other way, like a beat accent.
-  if (onset > 0.45f && onsetArmed_ && now - lastAccentAt_ > 250) {
-    accentSign_ = -accentSign_;
-    accent_ = accentSign_ * kAccentDegrees;
-    lastAccentAt_ = now;
-    onsetArmed_ = false;
-  } else if (onset < 0.2f) {
-    onsetArmed_ = true;
-  }
-  accent_ *= 0.88f;
-
-  sweepPhase_ += 2.0f * PI * kSweepHz * (0.25f + 0.75f * loud) * dt;
-  if (sweepPhase_ > 2.0f * PI) sweepPhase_ -= 2.0f * PI;
-
-  const float sweep = kSweepDegrees * (0.3f + 0.7f * loud) * sinf(sweepPhase_);
-  const float tilt = kLiftDegrees * loud + kNodDegrees * onset;
-  aim(sweep + accent_, tilt, kMaxDegreesPerSecond);
+  yawPhase_ = fmodf(yawPhase_ + 2.0f * PI * style_.yawHz * dt, 2.0f * PI);
+  tiltPhase_ = fmodf(tiltPhase_ + 2.0f * PI * style_.tiltHz * dt, 2.0f * PI);
+  aim(style_.yaw + style_.yawAmplitude * wave(yawPhase_, style_.snap),
+      style_.tilt + style_.tiltAmplitude * wave(tiltPhase_, style_.snap),
+      style_.rate);
 }

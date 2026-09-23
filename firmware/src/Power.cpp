@@ -162,7 +162,13 @@ void markBusy() {
   setIdle(false);
 }
 
-void setRadioAwake(bool awake) { radioAwake_ = awake; }
+void setRadioAwake(bool awake) {
+  if (radioAwake_.exchange(awake) == awake) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setTxPower(static_cast<wifi_power_t>(awake ? kVoiceTxPowerQuarterDbm
+                                                     : kWifiTxPowerQuarterDbm));
+  }
+}
 
 void service() {
   const uint32_t now = millis();

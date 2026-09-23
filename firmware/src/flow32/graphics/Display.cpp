@@ -173,6 +173,27 @@ void Display::blendPixel(int16_t x, int16_t y, uint16_t fg, uint8_t cover4) {
   drawPixel(x, y, blend565(fg, pixel(x, y), cover4));
 }
 
+void Display::writeRow(int16_t x, int16_t y, const uint16_t *colors, int16_t count) {
+  if (!mono_ || !colors || y < 0 || y >= panel_.height) return;
+  if (x < 0) {
+    colors -= x;
+    count += x;
+    x = 0;
+  }
+  if (x + count > panel_.width) count = panel_.width - x;
+  if (count <= 0) return;
+  const size_t start = size_t(y) * panel_.width + x;
+  if (fb_) memcpy(fb_ + start, colors, size_t(count) * sizeof(uint16_t));
+  for (int16_t i = 0; i < count; ++i) {
+    const uint16_t color = colors[i];
+    const size_t index = start + i;
+    const bool lit = (((color >> 11) & 31) * 8 + ((color >> 5) & 63) * 4 + (color & 31) * 8) >= 192;
+    if (lit) mono_[index / 8] |= 1 << (index % 8);
+    else mono_[index / 8] &= ~(1 << (index % 8));
+  }
+  for (int16_t tile = x / 16; tile <= (x + count - 1) / 16; ++tile) markDirty(tile * 16, y);
+}
+
 void Display::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
   if (!mono_ || y < 0 || y >= panel_.height) return;
   if (x < 0) {

@@ -100,9 +100,25 @@ and plays through the MAX98357. After playback Bunty acknowledges it, the
 gateway closes that turn, and Bunty opens the next socket and listens again.
 Conversation mode ends after 8 s without anyone talking.
 
+Claude tags each sentence with an emotion (soft, happy, excited, angry, sad,
+curious, sassy). The gateway strips the tag before speech and sends it as a
+control message, so Bunty's face and head switch the moment that sentence's
+audio reaches the speaker. `Face` draws the eyes, lids, blinks, glances and
+mouth from signed distance fields straight into the Flow32 framebuffer, and
+repaints only what changed. To judge faces without flashing:
+
+```sh
+tests/host/face_preview.sh /tmp/faces.png [mouth-open 0..1] [ms]
+```
+
+Set `cfg::ui::kFaceDemo` to show every face for five seconds on the device
+instead of booting normally.
+
 While listening, Bunty cocks its head. While thinking, it glances aside. While
-speaking, the tilt servo nods on syllable onsets and the yaw servo sweeps with
-the phrase, both scaled by the loudness actually reaching the speaker.
+speaking, the head performs a gesture pattern for the emotion Claude tagged the
+current sentence with (soft, happy, excited, angry, sad, curious, sassy). The
+switch lands when that sentence's audio reaches the speaker. Patterns live in
+`cfg::dance::kStyles`.
 
 Voice needs a gateway credential; see provisioning below. Serial logs every
 phase change, the transcript (`[voice] heard:`) and the reply (`[voice] bunty:`).
