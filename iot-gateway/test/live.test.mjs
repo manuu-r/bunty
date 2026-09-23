@@ -7,6 +7,7 @@ import {
   normalizeSpeechText,
   openFluxSocket,
   readLiveHandshake,
+  splitEmotion,
 } from "../src/live.js";
 
 class FakeSocket {
@@ -626,4 +627,23 @@ test("normalizeSpeechText produces a bounded single-line TTS string", () => {
     "first line second line",
   );
   assert.equal(normalizeSpeechText("one two three four", 14), "one two three…");
+});
+
+test("splitEmotion strips tags and keeps the first known emotion", () => {
+  assert.deepEqual(splitEmotion("[happy] Hello there."), {
+    emotion: "happy",
+    text: "Hello there.",
+  });
+  assert.deepEqual(splitEmotion("[ Angry ]No. [sad] Fine."), {
+    emotion: "angry",
+    text: "No. Fine.",
+  });
+  assert.deepEqual(splitEmotion("[grumpy] Unknown tags vanish."), {
+    emotion: null,
+    text: "Unknown tags vanish.",
+  });
+  assert.deepEqual(splitEmotion("No tags at all."), {
+    emotion: null,
+    text: "No tags at all.",
+  });
 });

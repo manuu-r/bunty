@@ -371,6 +371,31 @@ In AI Gateway, create:
 
 The Worker sets `device_id` itself after authentication, so devices cannot claim another device's budget bucket.
 
+## When voice stops working but text still answers
+
+Claude runs on your Anthropic key through AI Gateway, while Flux, Smart Turn
+and Aura are Cloudflare's own models and spend Workers AI neurons. An exhausted
+allowance therefore breaks speech while `/v1/infer` keeps working. Workers AI
+answers with HTTP 429 and:
+
+```json
+{"errors":[{"message":"AiError: ... you have used up your daily free allocation
+of 10,000 neurons ...","code":4006}],"success":false}
+```
+
+The Worker turns that into a 429 `ai_budget_or_rate_limit` for the device.
+Confirm it is account-wide, rather than a gateway problem, with a direct call:
+
+```sh
+curl -X POST "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/run/@cf/deepgram/aura-1" \
+  --header "Authorization: Bearer CLOUDFLARE_API_TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"text":"test","speaker":"arcas"}'
+```
+
+Bunty opens the Flux socket only after its microphone hears speech, so a quiet
+room costs nothing; audio recorded while the socket opens is still sent.
+
 ## Production notes
 
 - Use one token per physical device. Never ship the same credential across a fleet.

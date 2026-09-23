@@ -8,6 +8,31 @@ import {
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 const WEBSOCKET_OPEN = 1;
 
+// The voice prompt asks Claude to open each sentence with one of these; Bunty
+// turns them into head motion. They are never spoken, shown, or stored.
+export const EMOTIONS = [
+  "neutral", "soft", "happy", "excited", "angry", "sad", "curious", "sassy",
+];
+const BRACKET_TAG = /\[\s*([A-Za-z]+)\s*\]/g;
+
+/**
+ * Remove bracketed tags from model text and return the first known emotion.
+ * Unknown single-word tags are dropped too, so a speech synthesizer never
+ * reads "bracket grumpy bracket" aloud.
+ *
+ * @param {string} text
+ * @returns {{ emotion: string | null, text: string }}
+ */
+export function splitEmotion(text) {
+  let emotion = null;
+  const clean = text.replace(BRACKET_TAG, (_, name) => {
+    const candidate = name.toLowerCase();
+    if (emotion === null && EMOTIONS.includes(candidate)) emotion = candidate;
+    return "";
+  });
+  return { emotion, text: clean.replace(/\s+/g, " ").trim() };
+}
+
 export class LiveSessionError extends Error {
   /**
    * @param {string} code
@@ -142,6 +167,17 @@ export async function openFluxSocket(env, deviceId, config, requestId) {
 
   const socket = response?.webSocket;
   if (!socket || typeof socket.accept !== "function") {
+    // Workers AI reports an exhausted allowance or rate limit as a 429 here;
+    // pass that through rather than calling it a generic upstream failure.
+    const status = Number(response?.status);
+    if (status === 429) {
+      throw new LiveSessionError(
+        "ai_budget_or_rate_limit",
+        "AI usage limit reached. Try again later.",
+        429,
+        { "Retry-After": "60" },
+      );
+    }
     throw new LiveSessionError(
       "upstream_error",
       "The live transcription service did not open a WebSocket.",
@@ -868,7 +904,7 @@ export class LiveSession {
       }
     }
 
-    const spoken = speech.fullText.replace(/\s+/g, " ").trim();
+    const spoken = speech.spokenText();
     if (!spoken && !speech.audioStarted) {
       this.sendJson({
         type: "error",
@@ -1094,6 +1130,12 @@ class SpeechEmitter {
     this.spokenChars = 0;
     this.totalBytes = 0;
     this.audioStarted = false;
+    this.pendingEmotion = null;
+  }
+
+  /** The reply so far without emotion tags, as shown and remembered. */
+  spokenText() {
+    return splitEmotion(this.fullText).text;
   }
 
   /** @param {string} text */
@@ -1141,7 +1183,9 @@ class SpeechEmitter {
     if (session.stopped || !isOpen(session.downstream)) return;
 
     const config = session.config;
-    const text = chunk.replace(/\s+/g, " ").trim();
+    const tagged = splitEmotion(chunk);
+    if (tagged.emotion) this.pendingEmotion = tagged.emotion;
+    const text = tagged.text;
     if (!text) return;
     if (this.spokenChars >= config.maxTtsChars) return;
 
@@ -1183,13 +1227,23 @@ class SpeechEmitter {
       this.audioStarted = true;
     }
 
+    if (this.pendingEmotion) {
+      // Sent immediately before this sentence's PCM, so the device can apply it
+      // at that exact point in the audio stream.
+      session.sendJson({
+        type: "emotion",
+        turn: this.turnIndex,
+        name: this.pendingEmotion,
+      });
+      this.pendingEmotion = null;
+    }
     this.totalBytes += await session.pipeTtsAudio(ttsOutput);
 
     // Cumulative text so the device screen tracks what has been spoken so far.
     session.sendJson({
       type: "assistant.text",
       turn: this.turnIndex,
-      text: this.fullText.replace(/\s+/g, " ").trim(),
+      text: this.spokenText(),
     });
   }
 

@@ -9,6 +9,7 @@ import {
   LiveSessionError,
   openLiveSession,
   readLiveHandshake,
+  splitEmotion,
 } from "./live.js";
 import { readInferenceRequest, RequestValidationError } from "./request.js";
 import { voiceLoginPage, voiceUiPage } from "./voice-ui.js";
@@ -217,7 +218,7 @@ async function handleVoiceUiChat(request, env) {
       },
       aiOptions(config, "voice-ui", requestId),
     );
-    const reply = assistantText(result);
+    const reply = splitEmotion(assistantText(result)).text;
     if (!reply) throw new Error("AI response contained no text");
     return jsonResponse({ request_id: requestId, reply });
   } catch (error) {
