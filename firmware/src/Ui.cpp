@@ -25,7 +25,6 @@ DisplayPanel makePanel() {
 
 St77xxConfig makeTransport() {
   St77xxConfig config;
-  config.spi = &SPI;
   config.pinCs = cfg::pin::kTftCs;
   config.pinDc = cfg::pin::kTftDc;
   config.pinRst = cfg::pin::kTftRst;

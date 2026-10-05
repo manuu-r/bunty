@@ -1,5 +1,5 @@
 #include "InternalAllocation.h"
-#include <Arduino.h>
+#include "Runtime.h"
 #include <atomic>
 #include <esp_heap_caps.h>
 #include <freertos/semphr.h>

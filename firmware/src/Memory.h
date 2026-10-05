@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Runtime.h"
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 #include <atomic>

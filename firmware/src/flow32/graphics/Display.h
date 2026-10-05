@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Adafruit_GFX.h>
-#include <Arduino.h>
+#include "Runtime.h"
 
 #include "flow32/graphics/DisplayPanel.h"
 #include "flow32/graphics/DisplayTransport.h"

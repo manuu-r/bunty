@@ -2,7 +2,7 @@
 #include "Touch.h"
 #include "TouchPress.h"
 
-#include <Wire.h>
+#include <driver/i2c_master.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -25,23 +25,16 @@ int16_t seenMaxX_ = 0;
 int16_t seenMaxY_ = 0;
 bool reportedRange_ = false;
 
+i2c_master_bus_handle_t bus_ = nullptr;
+i2c_master_dev_handle_t device_ = nullptr;
+
 bool write(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(kAddress);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
+  const uint8_t bytes[] = {reg, value};
+  return i2c_master_transmit(device_, bytes, sizeof(bytes), 20) == ESP_OK;
 }
 
 bool readRegisters(uint8_t start, uint8_t *out, size_t length) {
-  Wire.beginTransmission(kAddress);
-  Wire.write(start);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(static_cast<int>(kAddress), static_cast<int>(length)) !=
-      static_cast<int>(length)) {
-    return false;
-  }
-  for (size_t i = 0; i < length; ++i) out[i] = Wire.read();
-  return true;
+  return i2c_master_transmit_receive(device_, &start, 1, out, length, 20) == ESP_OK;
 }
 
 // The controller powers up in auto-sleep and its reset line is tied to the
@@ -122,21 +115,32 @@ void readerTask(void *) {
 
 bool begin() {
   if (cfg::pin::kTouchSda < 0) return false;
-  Wire.begin(cfg::pin::kTouchSda, cfg::pin::kTouchScl, kBusHz);
-  Wire.setTimeOut(20);
+  i2c_master_bus_config_t config = {};
+  config.i2c_port = I2C_NUM_0;
+  config.sda_io_num = gpio_num_t(cfg::pin::kTouchSda);
+  config.scl_io_num = gpio_num_t(cfg::pin::kTouchScl);
+  config.clk_source = I2C_CLK_SRC_DEFAULT;
+  config.glitch_ignore_cnt = 7;
+  config.flags.enable_internal_pullup = true;
+  if (i2c_new_master_bus(&config, &bus_) != ESP_OK) return false;
   if (cfg::pin::kTouchInterrupt >= 0) pinMode(cfg::pin::kTouchInterrupt, INPUT_PULLUP);
-
-  Wire.beginTransmission(kAddress);
-  present_ = Wire.endTransmission() == 0;
+  present_ = i2c_master_probe(bus_, kAddress, 20) == ESP_OK;
   if (!present_) {
     logPrintf("[touch] nothing at 0x%02x on SDA=%d SCL=%d\n", kAddress,
               cfg::pin::kTouchSda, cfg::pin::kTouchScl);
     for (uint8_t address = 0x08; address < 0x78; ++address) {
-      Wire.beginTransmission(address);
-      if (Wire.endTransmission() == 0) logPrintf("[touch] but 0x%02x answered\n", address);
+      if (i2c_master_probe(bus_, address, 20) == ESP_OK)
+        logPrintf("[touch] but 0x%02x answered\n", address);
     }
+    i2c_del_master_bus(bus_);
+    bus_ = nullptr;
     return false;
   }
+  i2c_device_config_t device = {};
+  device.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  device.device_address = kAddress;
+  device.scl_speed_hz = kBusHz;
+  if (i2c_master_bus_add_device(bus_, &device, &device_) != ESP_OK) return false;
 
   configure();
   uint8_t identity[3] = {};

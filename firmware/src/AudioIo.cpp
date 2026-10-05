@@ -1,6 +1,6 @@
 #include "AudioIo.h"
 
-#include <driver/i2s.h>
+#include <driver/i2s_std.h>
 #include <esp_heap_caps.h>
 
 #include "Config.h"
@@ -46,34 +46,35 @@ bool Microphone::begin() {
   ring_ = xStreamBufferCreateStatic(kCaptureRingBytes + 1, 1, storage, &ringControl_);
 
   memory::InternalAllocationScope internal;
-  i2s_config_t config = {};
-  config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
-  config.sample_rate = kSampleRate;
-  config.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
-  config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-  config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-  config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  config.dma_buf_count = 6;
-  config.dma_buf_len = 160;
-  if (i2s_driver_install(cfg::kMicrophonePort, &config, 0, nullptr) != ESP_OK) {
-    Serial.println("[mic] could not install the I2S driver");
-    return false;
-  }
-  i2s_pin_config_t pins = {};
-  pins.mck_io_num = I2S_PIN_NO_CHANGE;
-  pins.bck_io_num = cfg::pin::kMicBclk;
-  pins.ws_io_num = cfg::pin::kMicWs;
-  pins.data_out_num = I2S_PIN_NO_CHANGE;
-  pins.data_in_num = cfg::pin::kMicData;
-  if (i2s_set_pin(cfg::kMicrophonePort, &pins) != ESP_OK) {
-    Serial.println("[mic] could not route the I2S pins");
-    i2s_driver_uninstall(cfg::kMicrophonePort);
+  i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(cfg::kMicrophonePort, I2S_ROLE_MASTER);
+  channel.dma_desc_num = 6;
+  channel.dma_frame_num = 160;
+  i2s_std_config_t config = {};
+  config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kSampleRate);
+  config.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
+  config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  config.gpio_cfg.bclk = gpio_num_t(cfg::pin::kMicBclk);
+  config.gpio_cfg.ws = gpio_num_t(cfg::pin::kMicWs);
+  config.gpio_cfg.dout = I2S_GPIO_UNUSED;
+  config.gpio_cfg.din = gpio_num_t(cfg::pin::kMicData);
+  if (!ring_ || i2s_new_channel(&channel, nullptr, &channel_) != ESP_OK ||
+      i2s_channel_init_std_mode(channel_, &config) != ESP_OK ||
+      i2s_channel_enable(channel_) != ESP_OK) {
+    Serial.println("[mic] could not initialize the I2S channel");
+    if (channel_) i2s_del_channel(channel_);
+    channel_ = nullptr;
+    heap_caps_free(storage);
+    ring_ = nullptr;
     return false;
   }
   available_ = true;
   if (xTaskCreatePinnedToCore(task, "mic", 4096, this, 6, nullptr, 1) != pdPASS) {
     available_ = false;
-    i2s_driver_uninstall(cfg::kMicrophonePort);
+    i2s_channel_disable(channel_);
+    i2s_del_channel(channel_);
+    channel_ = nullptr;
+    heap_caps_free(storage);
+    ring_ = nullptr;
     return false;
   }
   Serial.println("[mic] ready");
@@ -107,8 +108,7 @@ void Microphone::readOnce() {
               (slots_ & 1) ? "NOISE (ignored)" : "ok", (slots_ & 2) ? "NOISE (ignored)" : "ok");
   }
   size_t bytesRead = 0;
-  if (i2s_read(cfg::kMicrophonePort, slots, sizeof(slots), &bytesRead,
-               pdMS_TO_TICKS(100)) != ESP_OK || bytesRead == 0) {
+  if (i2s_channel_read(channel_, slots, sizeof(slots), &bytesRead, 100) != ESP_OK || bytesRead == 0) {
     return;
   }
   const size_t frames = bytesRead / (2 * sizeof(int32_t));
@@ -168,37 +168,33 @@ bool Speaker::open() {
   if (open_) return true;
   if (!installed_) {
     memory::InternalAllocationScope internal;
-    i2s_config_t config = {};
-    config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
-    config.sample_rate = kSampleRate;
-    config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-    config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-    config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-    config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    config.dma_buf_count = kSpeakerDmaBuffers;
-    config.dma_buf_len = kSpeakerDmaFrames;
-    // An underrun between sentences plays silence, not the last buffer looped.
-    config.tx_desc_auto_clear = true;
-    if (i2s_driver_install(cfg::kSpeakerPort, &config, 0, nullptr) != ESP_OK) {
-      Serial.println("[speaker] could not install the I2S driver");
-      return false;
-    }
-    i2s_pin_config_t pins = {};
-    pins.mck_io_num = I2S_PIN_NO_CHANGE;
-    pins.bck_io_num = cfg::pin::kAmpBclk;
-    pins.ws_io_num = cfg::pin::kAmpLrc;
-    pins.data_out_num = cfg::pin::kAmpDin;
-    pins.data_in_num = I2S_PIN_NO_CHANGE;
-    if (i2s_set_pin(cfg::kSpeakerPort, &pins) != ESP_OK) {
-      Serial.println("[speaker] could not route the I2S pins");
-      i2s_driver_uninstall(cfg::kSpeakerPort);
+    i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(cfg::kSpeakerPort, I2S_ROLE_MASTER);
+    channel.dma_desc_num = kSpeakerDmaBuffers;
+    channel.dma_frame_num = kSpeakerDmaFrames;
+    channel.auto_clear_after_cb = true;
+    i2s_std_config_t config = {};
+    config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kSampleRate);
+    config.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    config.gpio_cfg.bclk = gpio_num_t(cfg::pin::kAmpBclk);
+    config.gpio_cfg.ws = gpio_num_t(cfg::pin::kAmpLrc);
+    config.gpio_cfg.dout = gpio_num_t(cfg::pin::kAmpDin);
+    config.gpio_cfg.din = I2S_GPIO_UNUSED;
+    if (i2s_new_channel(&channel, &channel_, nullptr) != ESP_OK ||
+        i2s_channel_init_std_mode(channel_, &config) != ESP_OK) {
+      Serial.println("[speaker] could not initialize the I2S channel");
+      if (channel_) i2s_del_channel(channel_);
+      channel_ = nullptr;
       return false;
     }
     installed_ = true;
-  } else if (i2s_start(cfg::kSpeakerPort) != ESP_OK) {
-    return false;
   }
-  i2s_zero_dma_buffer(cfg::kSpeakerPort);
+  // A disabled channel retains DMA data; clear every descriptor before reuse
+  // so interruption never replays a fragment of the previous answer.
+  static const int16_t silence[kSpeakerDmaBuffers * kSpeakerDmaFrames * 2] = {};
+  size_t loaded = 0;
+  if (i2s_channel_preload_data(channel_, silence, sizeof(silence), &loaded) != ESP_OK ||
+      loaded != sizeof(silence) || i2s_channel_enable(channel_) != ESP_OK) return false;
   digitalWrite(cfg::pin::kAmpShutdown, HIGH);
   delay(5);  // MAX98357 leaves shutdown in about 1 ms; don't clip the first word
   open_ = true;
@@ -208,8 +204,7 @@ bool Speaker::open() {
 void Speaker::close() {
   if (!open_) return;
   digitalWrite(cfg::pin::kAmpShutdown, LOW);
-  i2s_zero_dma_buffer(cfg::kSpeakerPort);
-  i2s_stop(cfg::kSpeakerPort);
+  i2s_channel_disable(channel_);
   open_ = false;
 }
 
@@ -226,7 +221,7 @@ bool Speaker::write(const int16_t *samples, size_t count, uint8_t volumePercent)
     }
     size_t written = 0;
     const size_t bytes = frames * 2 * sizeof(int16_t);
-    if (i2s_write(cfg::kSpeakerPort, stereo, bytes, &written, pdMS_TO_TICKS(500)) != ESP_OK ||
+    if (i2s_channel_write(channel_, stereo, bytes, &written, 500) != ESP_OK ||
         written != bytes) {
       return false;
     }

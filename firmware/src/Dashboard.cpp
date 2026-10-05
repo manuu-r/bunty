@@ -3,8 +3,8 @@
 #include "DashboardCache.h"
 
 #include <ArduinoJson.h>
-#include <ESPmDNS.h>
-#include <HTTPClient.h>
+#include <mdns.h>
+#include <esp_http_client.h>
 #include <Preferences.h>
 #include <WiFi.h>
 
@@ -50,6 +50,7 @@ uint8_t liveArena_ = 0;
 char *body_ = nullptr;
 size_t bodyLength_ = 0;
 size_t bodyCapacity_ = 0;
+bool bodyOverflow_ = false;
 std::atomic<bool> resetDiscovery_{false};
 QueueHandle_t fetchCommands_ = nullptr;
 QueueHandle_t fetchResults_ = nullptr;
@@ -57,21 +58,65 @@ StaticQueue_t commandControl_, resultControl_;
 uint8_t commandStorage_[1], resultStorage_[sizeof(bool)];
 bool fetchBusy_ = false;
 
-class BodySink : public Stream {
+// IDF owns HTTP framing/chunk decoding; retain the existing bounded body.
+esp_err_t receiveBody(esp_http_client_event_t *event) {
+  if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  const size_t length = event->data_len;
+  if (length > bodyCapacity_ - bodyLength_) { bodyOverflow_ = true; return ESP_ERR_NO_MEM; }
+  memcpy(body_ + bodyLength_, event->data, length);
+  bodyLength_ += length;
+  body_[bodyLength_] = 0;
+  return ESP_OK;
+}
+
+// mDNS query results belong to the network worker and are always released.
+class NativeMdns {
  public:
-  int available() override { return 0; }
-  int read() override { return -1; }
-  int peek() override { return -1; }
-  void flush() override {}
-  size_t write(uint8_t b) override { return write(&b, 1); }
-  size_t write(const uint8_t *data, size_t length) override {
-    if (length > bodyCapacity_ - bodyLength_) return 0;
-    memcpy(body_ + bodyLength_, data, length);
-    bodyLength_ += length;
-    body_[bodyLength_] = 0;
-    return length;
+  ~NativeMdns() { clear(); }
+  bool begin(const char *hostname) {
+    if (mdns_init() != ESP_OK) return false;
+    if (mdns_hostname_set(hostname) == ESP_OK) return true;
+    mdns_free();
+    return false;
   }
+  void end() { clear(); mdns_free(); }
+  IPAddress queryHost(const String &hostname, uint32_t timeout) {
+    esp_ip4_addr_t ip = {};
+    if (mdns_query_a(hostname.c_str(), timeout, &ip) != ESP_OK) return IPAddress();
+    return IPAddress(ip.addr);
+  }
+  int queryService(const char *service, const char *protocol) {
+    clear();
+    const String type = String("_") + service;
+    const String proto = String("_") + protocol;
+    if (mdns_query_ptr(type.c_str(), proto.c_str(), cfg::net::kMdnsQueryTimeoutMs, 16, &results_) != ESP_OK) return 0;
+    int count = 0;
+    for (auto *r = results_; r; r = r->next) ++count;
+    return count;
+  }
+  String txt(int index, const char *key) const {
+    auto *r = at(index);
+    if (r) for (size_t i = 0; i < r->txt_count; ++i)
+      if (strcmp(r->txt[i].key, key) == 0) return r->txt[i].value ? r->txt[i].value : "";
+    return "";
+  }
+  IPAddress IP(int index) const {
+    auto *r = at(index);
+    if (r) for (auto *a = r->addr; a; a = a->next)
+      if (a->addr.type == ESP_IPADDR_TYPE_V4) return IPAddress(a->addr.u_addr.ip4.addr);
+    return IPAddress();
+  }
+  uint16_t port(int index) const { auto *r = at(index); return r ? r->port : 0; }
+ private:
+  void clear() { if (results_) mdns_query_results_free(results_); results_ = nullptr; }
+  mdns_result_t *at(int index) const {
+    auto *r = results_;
+    while (r && index-- > 0) r = r->next;
+    return r;
+  }
+  mdns_result_t *results_ = nullptr;
 };
+NativeMdns MDNS;
 bool available_ = false;
 bool online_ = false;
 uint8_t pageCount_ = 0;
@@ -190,7 +235,7 @@ bool locateGauge(IPAddress &address, uint16_t &port, String &path) {
   }
   if (!startMdns()) return false;
   const String &expected = serverId_;
-  if (expected.isEmpty()) {
+  if (expected.empty()) {
     Serial.println("[dashboard] no paired server_id stored; nothing to discover");
     return false;
   }
@@ -214,7 +259,7 @@ bool locateGauge(IPAddress &address, uint16_t &port, String &path) {
     if (advertised != expected) {
       logPrintf("[dashboard]   [%d] %s:%u id=%s -- not our server\n", i,
                     AddressText(candidate).c_str(), candidatePort,
-                    advertised.isEmpty() ? "(none)" : advertised.c_str());
+                    advertised.empty() ? "(none)" : advertised.c_str());
       continue;
     }
     ++idMatches;
@@ -262,7 +307,7 @@ void noteConnectFailure(const IPAddress &address, uint16_t port) {
   if (connectFailures_ < UINT8_MAX) ++connectFailures_;
   logPrintf("[dashboard] TCP connect failed to %s:%u (%u/%u, RSSI %d dBm)\n",
                 AddressText(address).c_str(), port, connectFailures_,
-                kReconnectAfterFailures, WiFi.RSSI());
+                kReconnectAfterFailures, int(WiFi.RSSI()));
   forgetDiscovery();
   if (connectFailures_ < kReconnectAfterFailures) return;
 
@@ -287,59 +332,39 @@ bool fetch() {
   String &path = requestPath_;
   if (!locateGauge(address, port, path)) return false;
 
-  WiFiClient client;
-  // Connect to the discovered numeric address ourselves. This avoids sending
-  // the address back through hostByName() inside HTTPClient and gives the
-  // recovery logic an exact TCP failure boundary.
-  if (!client.connect(address, port, kConnectTimeoutMs)) {
-    noteConnectFailure(address, port);
+  addressHost_ = AddressText(address).c_str();
+  esp_http_client_config_t config = {};
+  config.host = addressHost_.c_str();
+  config.port = port;
+  config.path = path.c_str();
+  config.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  config.timeout_ms = kReadTimeoutMs;
+  config.disable_auto_redirect = true;
+  config.event_handler = receiveBody;
+  auto request = esp_http_client_init(&config);
+  if (!request) return false;
+  esp_http_client_set_header(request, "Accept", "application/json");
+  esp_http_client_set_header(request, "Authorization", authorization_.c_str());
+  logPrintf("[dashboard] GET %s:%u%s (token %u chars)\n",
+            addressHost_.c_str(), port, path.c_str(), unsigned(tokenLength_));
+  bodyLength_ = 0;
+  bodyOverflow_ = false;
+  const uint32_t startedAt = millis();
+  const esp_err_t result = esp_http_client_perform(request);
+  const int status = esp_http_client_get_status_code(request);
+  const bool complete = esp_http_client_is_complete_data_received(request);
+  esp_http_client_cleanup(request);
+  if (result != ESP_OK || status != 200 || bodyLength_ == 0 || bodyOverflow_ || !complete) {
+    logPrintf("[dashboard] HTTP %d (%s) via %s:%u\n", status,
+              esp_err_to_name(result), addressHost_.c_str(), port);
+    if (result != ESP_OK) noteConnectFailure(address, port);
     return false;
   }
   connectFailures_ = 0;
   configuredAddress_ = address;
   directAddressFailed_ = false;
-
-  HTTPClient request;
-  request.setConnectTimeout(kConnectTimeoutMs);
-  request.setTimeout(kReadTimeoutMs);
-  addressHost_ = AddressText(address).c_str();
-  if (!request.begin(client, addressHost_, port, path)) {
-    noteConnectFailure(address, port);
-    return false;
-  }
-  request.addHeader("Accept", "application/json");
-  request.addHeader("Authorization", authorization_);
-  // Never log the token itself; its length is enough to tell "missing" from
-  // "present but rejected" when the server answers 401.
-  logPrintf("[dashboard] GET %s:%u%s (token %u chars)\n",
-                AddressText(address).c_str(), port, path.c_str(),
-                static_cast<unsigned>(tokenLength_));
-
-  const uint32_t startedAt = millis();
-  const int status = request.GET();
-  if (status != HTTP_CODE_OK) {
-    if (status < 0) {
-      logPrintf("[dashboard] HTTP %d (%s) via %s:%u\n", status,
-                    HTTPClient::errorToString(status).c_str(),
-                    AddressText(address).c_str(), port);
-    } else {
-      logPrintf("[dashboard] HTTP %d via %s:%u\n", status,
-                    AddressText(address).c_str(), port);
-    }
-    request.end();
-    if (status < 0) noteConnectFailure(address, port);
-    return false;
-  }
-
-  bodyLength_ = 0;
-  BodySink sink;
-  const int expected = request.getSize();
-  const int received = expected > int(bodyCapacity_) ? -1 : request.writeToStream(&sink);
-  request.end();
-  if (received <= 0 || size_t(received) != bodyLength_) return false;
   logPrintf("[dashboard] HTTP 200, %u bytes in %u ms\n",
-                static_cast<unsigned>(bodyLength_),
-                static_cast<unsigned>(millis() - startedAt));
+            unsigned(bodyLength_), unsigned(millis() - startedAt));
   return true;
 }
 
@@ -521,7 +546,7 @@ void begin(Preferences &storage, const String &hardwareId) {
 
 void restart() {
   serverId_ = storage_->getString(cfg::nvs::kServerId, "");
-  mdnsHost_ = "gauge-" + serverId_.substring(0, 12);
+  mdnsHost_ = "gauge-" + serverId_.substr(0, 12);
   requestPath_ = storage_->getString(cfg::nvs::kPath, kDefaultPath);
   const String token = storage_->getString(cfg::nvs::kToken, "");
   tokenLength_ = token.length();
@@ -627,15 +652,21 @@ void notifyGaugeOnWorker() {
   String &ignored = requestPath_;
   if (!locateGauge(address, port, ignored)) return;
 
-  WiFiClient client;
-  HTTPClient request;
-  request.setConnectTimeout(kUnpairNotifyConnectMs);
-  request.setTimeout(kUnpairNotifyReadMs);
   addressHost_ = AddressText(address).c_str();
-  if (!request.begin(client, addressHost_, port, "/v1/accessory")) return;
-  request.addHeader("Authorization", authorization_);
-  const int status = request.sendRequest("DELETE");
-  request.end();
+  esp_http_client_config_t config = {};
+  config.host = addressHost_.c_str();
+  config.port = port;
+  config.path = "/v1/accessory";
+  config.method = HTTP_METHOD_DELETE;
+  config.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  config.timeout_ms = kUnpairNotifyReadMs;
+  config.disable_auto_redirect = true;
+  auto request = esp_http_client_init(&config);
+  if (!request) return;
+  esp_http_client_set_header(request, "Authorization", authorization_.c_str());
+  esp_http_client_perform(request);
+  const int status = esp_http_client_get_status_code(request);
+  esp_http_client_cleanup(request);
   logPrintf("[unpair] Gauge returned HTTP %d\n", status);
 }
 

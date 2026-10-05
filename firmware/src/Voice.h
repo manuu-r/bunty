@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Runtime.h"
 #include <atomic>
 #include <esp_websocket_client.h>
 #include <freertos/FreeRTOS.h>

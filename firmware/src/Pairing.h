@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Runtime.h"
 
 class Preferences;
 
@@ -33,5 +33,8 @@ bool active();
 bool service();
 
 void stop();
+// Reclaim controller/host static memory after commissioning; re-pairing
+// subsequently requires the same reboot used by the existing Settings flow.
+void releaseMemory();
 
 }  // namespace pairing

@@ -1,7 +1,8 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Runtime.h"
 #include <atomic>
+#include <driver/i2s_std.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/stream_buffer.h>
 
@@ -28,6 +29,7 @@ class Microphone {
   static void task(void *context);
   void readOnce();
 
+  i2s_chan_handle_t channel_ = nullptr;
   StreamBufferHandle_t ring_ = nullptr;
   StaticStreamBuffer_t ringControl_ = {};
   std::atomic<bool> available_{false};
@@ -54,6 +56,7 @@ class Speaker {
   bool write(const int16_t *samples, size_t count, uint8_t volumePercent);
 
  private:
+  i2s_chan_handle_t channel_ = nullptr;
   bool installed_ = false;
   bool open_ = false;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Runtime.h"
 #include <atomic>
 #include <freertos/queue.h>
 

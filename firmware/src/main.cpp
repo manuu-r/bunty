@@ -174,6 +174,10 @@ void startRuntime(bool reconnectWifi) {
   displayState = DisplayState::Dashboard;
   lastInteractionAt = millis();
   dashboard::restart();
+  // Commissioning has ended (or this boot was already paired). Reclaim BLE
+  // before allocating voice tasks and I2S DMA; no audio is needed in setup.
+  pairing::releaseMemory();
+  if (!microphone.available() && microphone.begin()) startVoice();
 
   if (reconnectWifi) {
     WiFi.mode(WIFI_STA);
@@ -636,7 +640,6 @@ void setup() {
   power::begin(preferences);
   loadIdentity();
   syncIotGatewayCredential();
-  if (microphone.begin()) startVoice();
   dashboard::begin(preferences, hardwareId);
 
   const bool touchReady = touch::begin();
@@ -696,4 +699,11 @@ void loop() {
     memory::report();
   }
   delay(8);
+}
+
+// Native ESP-IDF entry point; retain the existing application state machine.
+extern "C" void app_main() {
+  platformInit();
+  setup();
+  for (;;) loop();
 }

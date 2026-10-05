@@ -1,6 +1,6 @@
 #pragma once
 
-#include <driver/i2s.h>
+#include <driver/i2s_types.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -46,8 +46,8 @@ constexpr int kMicData = 13;
 }  // namespace pin
 
 // Give the amplifier and the microphones their own I2S controller each.
-constexpr i2s_port_t kSpeakerPort = I2S_NUM_0;
-constexpr i2s_port_t kMicrophonePort = I2S_NUM_1;
+constexpr int kSpeakerPort = I2S_NUM_0;
+constexpr int kMicrophonePort = I2S_NUM_1;
 
 // --------------------------------------------------------------- display ---
 
