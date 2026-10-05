@@ -660,7 +660,7 @@ void Voice::playOnce() {
   float energy = 0.0f;
   for (size_t i = 0; i < count; ++i) energy += float(samples[i]) * samples[i];
   outputLevel_ = sqrtf(energy / count) / cfg::audio::kLevelFullScale;
-  if (!speaker_.write(samples, count, power::volumeCeiling(cfg::audio::kVolumePercent))) {
+  if (!speaker_.write(samples, count, cfg::audio::kVolumePercent)) {
     Serial.println("[speaker] I2S write failed");
   }
 }

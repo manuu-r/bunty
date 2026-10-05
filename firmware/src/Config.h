@@ -171,7 +171,6 @@ constexpr uint8_t kActiveCpuMhz = 240;
 
 constexpr uint32_t kConservativeMs = 10 * 60 * 1000;
 constexpr uint8_t kConservativeBacklight = 160;
-constexpr uint8_t kConservativeVolumePercent = 45;
 constexpr float kConservativeServoDegreesPerSecond = 20.0f;
 
 constexpr uint8_t kSaverBacklight = 60;
@@ -255,7 +254,7 @@ constexpr int kMicShift = 13;
 constexpr uint32_t kMicSlotRatio = 8;
 constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow TLS + Flux setup
 
-constexpr uint8_t kVolumePercent = 70;
+constexpr uint8_t kVolumePercent = 95;
 constexpr int kSpeakerDmaBuffers = 4;
 constexpr int kSpeakerDmaFrames = 240;
 constexpr uint32_t kSpeakerDrainMs =

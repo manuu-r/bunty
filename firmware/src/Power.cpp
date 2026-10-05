@@ -213,12 +213,6 @@ float servoSpeed(float requestedDegreesPerSecond) {
              : kConservativeServoDegreesPerSecond;
 }
 
-uint8_t volumeCeiling(uint8_t requestedPercent) {
-  if (mode_ == Mode::kNormal) return requestedPercent;
-  return requestedPercent < kConservativeVolumePercent ? requestedPercent
-                                                       : kConservativeVolumePercent;
-}
-
 Mode mode() { return mode_; }
 
 const char *modeName() {

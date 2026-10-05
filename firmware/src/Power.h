@@ -33,7 +33,6 @@ void setRadioAwake(bool awake);
 
 uint8_t backlightCeiling();
 float servoSpeed(float requestedDegreesPerSecond);
-uint8_t volumeCeiling(uint8_t requestedPercent);
 
 Mode mode();
 const char *modeName();
