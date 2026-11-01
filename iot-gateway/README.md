@@ -18,6 +18,7 @@ The public API deliberately does **not** accept a model, system prompt, tools, p
 
 - `POST /v1/infer` with a small JSON schema
 - `GET /v1/live` WebSocket for raw PCM → Flux → Claude → Aura Aries → raw PCM
+- `POST /v1/speak`: tagged reply text → Aura PCM framed with expression cues and tiny reaction GIFs, for Muse-driven devices
 - Password-protected Bunty browser voice UI at `/`, using Flux STT and Aura TTS
 - Per-device random bearer tokens; only SHA-256 hashes are stored in D1
 - Individual device enable/disable and token rotation

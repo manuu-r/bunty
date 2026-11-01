@@ -12,8 +12,11 @@ class Vad {
  public:
   enum class Event { None, Started, Ended };
   static constexpr size_t kPreRollFrames = 5120;  // 320 ms, including onset.
+  static constexpr size_t kTailFrames = 4000;     // 250 ms kept after the last word.
   void reset() { onset_ = quiet_ = duration_ = 0; speaking_ = false; }
   bool speaking() const { return speaking_; }
+  // Silence recorded past the last word: it only delays the upload.
+  size_t excessQuiet() const { return quiet_ > kTailFrames ? quiet_ - kTailFrames : 0; }
   Event process(const int16_t *pcm, size_t frames) {
     if (!frames) return Event::None;
     double energy = 0;

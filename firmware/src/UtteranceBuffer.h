@@ -13,6 +13,7 @@ class UtteranceBuffer {
     if(!storage_ || !pcm || frames>kUtteranceFrames-used_)return false;
     memcpy(storage_+used_,pcm,frames*sizeof(int16_t));used_+=frames;return true;
   }
+  void dropTail(size_t frames){used_-=frames<used_?frames:used_;}
   size_t frames() const {return used_;}
   const int16_t *data() const {return storage_;}
  private:

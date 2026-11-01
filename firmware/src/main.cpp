@@ -60,11 +60,15 @@ bool voiceFaceShown = false;
 bool remoteDisplayShown = false;
 Voice::Phase shownPhase = Voice::Phase::Off;
 uint32_t lastFaceFrameAt = 0;
-float mouthLevel = 0.0f;
 uint32_t noticeUntil = 0;
 uint32_t pairRestartAt = 0;
+void showIdleFace(Emotion mood = Emotion::Neutral);
+// Never words on the face: a frown and a shake of the head. The reason is logged.
 void showNotice(const char *text,uint32_t duration) {
-  ui::showError(text); noticeUntil=millis()+duration;
+  logPrintf("[ui] %s\n",text);
+  showIdleFace(Emotion::Sad);
+  speechGesture::requestVisual(speechGesture::Kind::Shake,millis(),speechGesture::Speed::Normal);
+  noticeUntil=millis()+duration;
 }
 
 bool clockSyncRequested = false;
@@ -141,15 +145,15 @@ void serviceClockSync() {
 
 // -------------------------------------------------------------- runtime ---
 
-void showIdleFace() {
+void showIdleFace(Emotion mood) {
   ui::Guard guard;
   if(muse::displayActive()) return;
   if(shell::resume()) {shell::invalidate();return;}
-  animations->setEmotion(Emotion::Neutral);
+  animations->setEmotion(mood);
   animations->setAttention(Face::Attention::Idle);
   ui::display().clear(cfg::ui::kBackground);
   animations->beginSpeaking(millis(), false);
-  ui::drawControls();
+  if (cfg::ui::kTextContent) ui::drawControls();
   ui::display().present();
 }
 
@@ -292,7 +296,6 @@ bool serviceFace() {
 void showVoiceFace(uint32_t now) {
   voiceFaceShown = true;
   shownPhase = Voice::Phase::Off;
-  mouthLevel = 0.0f;
   ui::Guard guard;
   ui::display().clear(cfg::ui::kBackground);
   animations->beginSpeaking(now, false);
@@ -319,21 +322,21 @@ void serviceVoiceFace(uint32_t now) {
   const bool changed=phase!=shownPhase;
   shownPhase=phase;
   animations->setAttention(phase==Voice::Phase::Listening?Face::Attention::Listening:
-    phase==Voice::Phase::Speaking?Face::Attention::Speaking:Face::Attention::Thinking);
+    phase==Voice::Phase::Speaking?Face::Attention::Speaking:
+    voice.working()?Face::Attention::Working:Face::Attention::Thinking);
   animations->setEmotion(phase==Voice::Phase::Speaking?voice.emotion():Emotion::Neutral);
   {ui::Guard guard;animations->serviceSpeaking(now);}
   if(!changed && now-lastFaceFrameAt<cfg::voice::kFaceFrameMs)return;
   lastFaceFrameAt=now;
   const float level=phase==Voice::Phase::Speaking?voice.outputLevel():0;
-  mouthLevel+=(level-mouthLevel)*(level>mouthLevel?.6f:.3f);
   ui::Guard guard;
-  animations->drawSpeakingMouth(uint8_t(std::min(mouthLevel*120.f,100.f)));
+  animations->drawSpeakingMouth(uint8_t(level*100.f));
 }
 
 // Returns true while the conversation owns the screen and touch.
 bool serviceVoice() {
   const uint32_t now = millis();
-  dance.service(voice.phase(), voice.emotion(), now);
+  dance.service(voice, now);
   if (!voice.active()) {
     if (voiceFaceShown) hideVoiceFace();
     return false;
@@ -364,12 +367,15 @@ void serviceRuntime() {
     remoteDisplayShown=true; voiceFaceShown=false;
     overlay=Overlay::kNone; displayState=DisplayState::Idle;
     ui::fadeBacklightTo(255);
-    dance.service(voice.phase(),voice.emotion(),millis());
+    dance.service(voice,millis());
     if(muse::imageFetching() || voice.active()) power::markBusy();
     lastInteractionAt=millis();
     const auto event=touch::poll();
-    if(event.kind==touch::Event::Kind::kTap)muse::tapDisplay();
-    else if(event.kind==touch::Event::Kind::kLongPress) {
+    if(event.kind==touch::Event::Kind::kTap) {
+      const bool spoken=muse::speechPictureActive();
+      muse::tapDisplay();
+      if(spoken)voice.toggle(); // the picture is part of the reply being interrupted
+    } else if(event.kind==touch::Event::Kind::kLongPress) {
       if(voice.active())voice.end();
       else {muse::dismissDisplay();openSettings();}
     }
@@ -377,10 +383,11 @@ void serviceRuntime() {
   }
   if(pairRestartAt) return;
   if(noticeUntil) {
+    dance.service(voice,millis());
     if(static_cast<int32_t>(millis()-noticeUntil)<0) return;
     noticeUntil=0; showIdleFace();
   }
-  if(remoteDisplayShown) { remoteDisplayShown=false; showIdleFace(); }
+  if(remoteDisplayShown) { remoteDisplayShown=false; if(!voice.active()) showIdleFace(); }
   if(shell::takeFaceRequest()) showIdleFace();
   if (greetingEyesShown && static_cast<int32_t>(millis() - greetingEndsAt) < 0) return;
   if (greetingEyesShown) {
@@ -392,7 +399,7 @@ void serviceRuntime() {
 
   if(shell::visible()) {
     voiceFaceShown=false; displayState=DisplayState::Idle; overlay=Overlay::kNone;
-    dance.service(voice.phase(),voice.emotion(),millis());
+    dance.service(voice,millis());
     const uint32_t now=millis();
     auto event=touch::poll();
     const bool dimmed=!voice.active() && now-shell::activityAt()>=cfg::ui::kIdleSleepMs;
@@ -427,7 +434,7 @@ void serviceRuntime() {
       serviceSettingsTouch(event);
       return;
     }
-    if(event.kind==touch::Event::Kind::kTap && ui::settingsControlAt(event.x,event.y)) {
+    if(cfg::ui::kTextContent && event.kind==touch::Event::Kind::kTap && ui::settingsControlAt(event.x,event.y)) {
       shell::showHome();return;
     }
     if(event.kind==touch::Event::Kind::kTap) {
@@ -621,6 +628,20 @@ void setup() {
   }
 }
 
+// Decoding and drawing take the display, so they happen here and not on the
+// audio task that fires the cue. A cue precedes the phase change it belongs to,
+// so a picture this new is not yet evidence that speech has ended.
+void serviceSpeechPicture() {
+  static uint32_t shownAt=0;
+  const uint8_t *data=nullptr;size_t bytes=0;
+  if(voice.takePicture(data,bytes)) {
+    if(muse::showSpeechPicture(data,bytes))shownAt=millis();
+    voice.releasePicture();
+  } else if(muse::speechPictureActive() && voice.phase()!=Voice::Phase::Speaking && millis()-shownAt>=500) {
+    muse::endSpeechPicture();
+  }
+}
+
 void serviceVoiceAura() {
   if(!runtimeStarted)return;
   static uint32_t last=0;
@@ -634,7 +655,7 @@ void serviceVoiceAura() {
   voiceAura::State state=voiceAura::State::Off;
   switch(phase) {
     case Voice::Phase::Listening:state=voiceAura::State::Listening;break;
-    case Voice::Phase::Thinking:state=voiceAura::State::Thinking;break;
+    case Voice::Phase::Thinking:state=voice.working()?voiceAura::State::Working:voiceAura::State::Thinking;break;
     case Voice::Phase::Speaking:state=voiceAura::State::Speaking;break;
     case Voice::Phase::Connecting:state=voiceAura::State::Connecting;break;
     case Voice::Phase::Finishing:state=voiceAura::State::Finishing;break;
@@ -657,6 +678,7 @@ void loop() {
   if (!setupReady) { delay(100); return; }
   power::service();
   serviceVoiceAura();
+  serviceSpeechPicture();
   muse::serviceDisplay();
   muse::service(turnServoReady ? &turnServo : nullptr, tiltServoReady ? &tiltServo : nullptr, turnHome, tiltHome, voice.phase()!=Voice::Phase::Off || dance.active() || speechGesture::visualWaiting());
 

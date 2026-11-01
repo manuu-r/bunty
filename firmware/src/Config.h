@@ -64,6 +64,9 @@ constexpr uint32_t kBacklightPwmHz = 12000;
 constexpr uint8_t kSleepBacklightDuty = 8;
 // Temporary bench check: at boot, show each emotion's face for 5 s, forever.
 constexpr bool kFaceDemo = false;
+// Bunty's screen is for its face and pictures. False withholds every Muse tool
+// that draws words or lists; pairing and Settings still need theirs.
+constexpr bool kTextContent = false;
 constexpr uint32_t kPairingActivityFrameMs = 420;
 constexpr uint32_t kIdleSleepMs = 120000;
 
@@ -210,9 +213,9 @@ constexpr uint32_t kInputFullScaleRms = 1500;
 
 // ----------------------------------------------------------------- dance ---
 
-// Bunty's head while it talks is driven by the emotion of the sentence being
-// spoken, not by the sound: each emotion is a gesture pattern of yaw and tilt
-// oscillation around a leaning rest pose.
+// Bunty's head while it talks: the emotion of the sentence being spoken picks a
+// gesture pattern of yaw and tilt oscillation around a leaning rest pose, and
+// the loudness of the sound scales it, so the head settles between phrases.
 namespace dance {
 // Smooth patterns glide on a sine; snappy ones jump between the two extremes
 // as fast as `rate` allows and hold there.
@@ -222,23 +225,45 @@ struct Style {
   float rate;                                        // top speed, degrees per second
   float snap;                                        // 0 smooth .. 1 snappy
 };
+// The small-arc power reservation; every pose below must fit inside it.
+constexpr float kMaxYawDegrees = 18.0f;
+constexpr float kMaxTiltDegrees = 15.0f;
+constexpr float kMaxDegreesPerSecond = 60.0f;
 // Indexed by Emotion.
 constexpr Style kStyles[] = {
-    {40.0f, 0.40f, 15.0f, 0.80f, 0.0f, 0.0f, 300.0f, 0.0f},      // neutral
-    {25.0f, 0.25f, 10.0f, 0.35f, -10.0f, 0.0f, 120.0f, 0.0f},    // soft: slow sway, head low
-    {50.0f, 0.60f, 22.0f, 1.60f, 12.0f, 0.0f, 450.0f, 0.0f},     // happy: bouncy, head up
-    {70.0f, 1.00f, 28.0f, 2.20f, 8.0f, 0.0f, 650.0f, 0.2f},      // excited: big and fast
-    {35.0f, 1.50f, 20.0f, 2.00f, -18.0f, 0.0f, 650.0f, 1.0f},    // angry: sharp head jerks
-    {18.0f, 0.18f, 8.0f, 0.25f, -25.0f, 0.0f, 70.0f, 0.0f},      // sad: slow, low, still
-    {25.0f, 0.30f, 14.0f, 0.45f, 20.0f, 30.0f, 150.0f, 0.0f},    // curious: head cocked
-    {45.0f, 0.80f, 15.0f, 0.80f, 18.0f, -25.0f, 550.0f, 0.7f},   // sassy: chin up, flicks
+    {6.0f, 0.35f, 3.0f, 0.70f, 0.0f, 0.0f, 30.0f, 0.0f},     // neutral
+    {5.0f, 0.22f, 2.5f, 0.30f, -4.0f, 0.0f, 20.0f, 0.0f},    // soft: slow sway, head low
+    {9.0f, 0.60f, 5.0f, 1.40f, 5.0f, 0.0f, 45.0f, 0.0f},     // happy: bouncy, head up
+    {12.0f, 0.90f, 6.0f, 1.90f, 4.0f, 0.0f, 60.0f, 0.2f},    // excited: big and fast
+    {8.0f, 1.20f, 5.0f, 1.60f, -7.0f, 0.0f, 60.0f, 1.0f},    // angry: sharp head jerks
+    {4.0f, 0.18f, 2.0f, 0.22f, -11.0f, 0.0f, 18.0f, 0.0f},   // sad: slow, low, still
+    {5.0f, 0.30f, 3.0f, 0.45f, 9.0f, 11.0f, 30.0f, 0.0f},    // curious: head cocked
+    {9.0f, 0.70f, 4.0f, 0.70f, 8.0f, -9.0f, 50.0f, 0.7f},    // sassy: chin up, flicks
 };
 // Fraction of the way to a new style per tick: about 300 ms to settle.
 constexpr float kStyleBlend = 0.07f;
+// Speech loudness: the head lifts with it, and keeps this much sway at rest.
+constexpr float kBeatBlend = 0.25f;
+constexpr float kBeatTiltDegrees = 3.0f;
+constexpr float kRestGain = 0.35f;
 constexpr float kListenTiltDegrees = 15.0f;   // curious head cock while listening
-constexpr float kThinkTurnDegrees = -30.0f;  // glance aside while thinking
+constexpr float kThinkTurnDegrees = -14.0f;   // glance aside while thinking
 constexpr float kThinkTiltDegrees = 12.0f;
-constexpr float kPoseDegreesPerSecond = 90.0f;
+constexpr float kWorkSweepDegrees = 4.0f;     // scanning while Muse works on a task
+constexpr float kWorkSweepHz = 0.35f;
+constexpr float kPoseDegreesPerSecond = 60.0f;
+
+constexpr bool stylesFit() {
+  for (const Style &s : kStyles) {
+    const float yaw = (s.yaw < 0.0f ? -s.yaw : s.yaw) + s.yawAmplitude;
+    if (yaw > kMaxYawDegrees || s.rate > kMaxDegreesPerSecond) return false;
+    // Loudness only ever lifts the head.
+    if (s.tilt + s.tiltAmplitude + kBeatTiltDegrees > kMaxTiltDegrees) return false;
+    if (s.tilt - s.tiltAmplitude < -kMaxTiltDegrees) return false;
+  }
+  return true;
+}
+static_assert(stylesFit(), "a style clipped by the power reservation loses its character");
 constexpr uint32_t kTickMs = 20;
 }  // namespace dance
 

@@ -15,6 +15,7 @@
 #include "TtsStream.h"
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <atomic>
 #include <cmath>
 extern "C" {
 #include "muse_chat.h"
@@ -25,7 +26,10 @@ muse::ReplyMailbox *replies = nullptr;
 struct PlaybackBuffers { uint8_t bytes[1281]; int16_t pcm[640]; char body[audio::kTtsBodyCapacity]; };
 TaskHandle_t ttsWorker=nullptr;
 PlaybackBuffers *playback = nullptr;
+std::atomic<bool> agentBusy{false};
+constexpr uint32_t kPlayoutMs=8000; // the ring, plus a margin; playback never blocks longer
 }
+extern "C" void bunty_muse_agent_busy(bool busy) {agentBusy=busy;}
 extern "C" void bunty_muse_queue_tts(const char *text) {
   if(!replies || !replies->push(text)) Serial.println("[muse] TTS queue full; reply remains in Muse app");
   else xTaskNotifyGive(ttsWorker);
@@ -37,6 +41,8 @@ bool Voice::begin(Microphone *mic,const char *token) {
   void *mailboxStorage=memory::external(sizeof(muse::ReplyMailbox));
   if(mailboxStorage) replies=new(mailboxStorage) muse::ReplyMailbox;
   playback=static_cast<PlaybackBuffers *>(memory::external(sizeof(PlaybackBuffers)));
+  auto *speech=static_cast<int16_t *>(memory::external(audio::kPlaybackFrames*sizeof(int16_t)));
+  auto *pictures=static_cast<uint8_t *>(memory::external(audio::SpeechPictures::kSlots*audio::kPictureMaxBytes));
   preRollStorage_=static_cast<uint8_t *>(memory::external(muse::Vad::kPreRollFrames*sizeof(int16_t)));
   utteranceStorage_=static_cast<int16_t *>(memory::external(muse::kUtteranceFrames*sizeof(int16_t)));
   auto cleanup = [&] {
@@ -44,22 +50,30 @@ bool Voice::begin(Microphone *mic,const char *token) {
     heap_caps_free(playback); playback=nullptr;
     heap_caps_free(preRollStorage_); preRollStorage_=nullptr;
     heap_caps_free(utteranceStorage_);utteranceStorage_=nullptr;
+    heap_caps_free(speech);heap_caps_free(pictures);
   };
-  if(!replies || !playback || !preRollStorage_ || !utteranceStorage_) { cleanup(); return false; }
+  if(!replies || !playback || !speech || !pictures || !preRollStorage_ || !utteranceStorage_) { cleanup(); return false; }
+  player_.attach(speech);pictures_.attach(pictures);
   // Keep task stacks in internal RAM; only payload storage belongs in PSRAM.
   // TLS gets its own stack instead of nesting under SDK polling/capture.
   if(xTaskCreate(ttsTask,"muse_tts",12288,this,4,&ttsWorker)!=pdPASS) { cleanup(); return false; }
-  if(!bunty_muse_chat_init()) {
+  // Above the network and display, beside the microphone: only I2S blocks it.
+  TaskHandle_t audioWorker=nullptr;
+  if(xTaskCreatePinnedToCore(audioTask,"muse_audio",4096,this,5,&audioWorker,1)!=pdPASS) {
     vTaskDelete(ttsWorker); ttsWorker=nullptr; cleanup(); return false;
   }
+  if(!bunty_muse_chat_init()) {
+    vTaskDelete(audioWorker); vTaskDelete(ttsWorker); ttsWorker=nullptr; cleanup(); return false;
+  }
   if(xTaskCreate(voiceTask,"muse_voice",8192,this,4,nullptr)!=pdPASS) {
-    vTaskDelete(ttsWorker); ttsWorker=nullptr; cleanup(); return false;
+    vTaskDelete(audioWorker); vTaskDelete(ttsWorker); ttsWorker=nullptr; cleanup(); return false;
   }
   ready_=true;
   Serial.println("[muse] tap to talk; VAD sends after a pause and listens after replies");
   return true;
 }
 bool Voice::ready() const { return ready_ && muse_hatch_ready(); }
+bool Voice::working() const { return agentBusy; }
 const char *Voice::phaseName(Phase phase) {
   switch(phase) {
     case Phase::Off:return "off";
@@ -82,14 +96,14 @@ void Voice::run() {
   muse::UtteranceBuffer utterance(utteranceStorage_);
   bool museDone=false, failed=false, uploading=false, resumeListening=false;
   auto stop = [&] {
-    speechGesture::clear();detected_=false;
+    speechGesture::clear();detected_=false;agentBusy=false;
     microphone_->setCapturing(false); microphone_->discard();
-    muse_hatch_turn_cancel(); replies->cancel(); resumeListening=false;
+    muse_hatch_turn_cancel(); replies->cancel(); player_.stop(); resumeListening=false;
     vad.reset(); preRoll.reset(); utterance.reset(); uploading=false; museDone=false;
     setPhase(replies->empty()?Phase::Off:Phase::Finishing); power::setRadioAwake(!replies->empty());
   };
   auto listen = [&] {
-    speechGesture::clearSpeech();detected_=false;lastError_="";
+    speechGesture::clearSpeech();detected_=false;lastError_="";agentBusy=false;
     microphone_->setCapturing(false); microphone_->discard();
     vad.reset(); preRoll.reset(); utterance.reset(); uploading=false; museDone=false; failed=false;
     microphone_->setCapturing(true); setPhase(Phase::Listening);
@@ -98,8 +112,10 @@ void Voice::run() {
   auto finish = [&] {
     detected_=false;
     microphone_->setCapturing(false);setPhase(Phase::Thinking);
+    player_.chime(); // heard you: the sound lands with the change of face and pose
     for(size_t n;(n=microphone_->read(reinterpret_cast<uint8_t *>(pcm),sizeof(pcm),0));)
       if(!utterance.append(pcm,n/sizeof(int16_t))) {lastError_="Voice note too long";stop();return;}
+    utterance.dropTail(vad.excessQuiet());
     logPrintf("[muse] buffered note: frames=%u\n",unsigned(utterance.frames()));
     struct UploadOps {
       Voice &voice;
@@ -184,7 +200,7 @@ void Voice::run() {
         // Do not print SDK error text: it may include remote diagnostics.
         lastError_=muse::turnError(eventText);
         logPrintf("[muse] turn failed: %s\n",lastError_.load());
-        microphone_->setCapturing(false); replies->cancel();
+        microphone_->setCapturing(false); replies->cancel(); player_.stop();
         museDone=true; failed=true;
       }
     }
@@ -197,7 +213,8 @@ void Voice::run() {
       else lastError_="Muse disconnected";
     }
     if(phase_==Phase::Thinking && speaking_) setPhase(Phase::Speaking);
-    if(phase_==Phase::Speaking && !speaking_) setPhase(Phase::Thinking);
+    // Stay in character between queued messages; only silence with nothing left is thinking.
+    if(phase_==Phase::Speaking && !speaking_ && replies->empty()) setPhase(Phase::Thinking);
     if(museDone && replies->empty()) {
       if(failed || toggleRequested_ || !muse_hatch_ready()) stop();
       else listen();
@@ -215,27 +232,72 @@ void Voice::ttsTask(void *context) {
       if(!replies->cancelled(reply->generation) && !voice->playTts(reply->text,reply->generation)
          && !replies->cancelled(reply->generation) && !voice->toggleRequested_ && !voice->endRequested_)
         voice->playbackFailed_=true;
-      voice->outputLevel_=0;
-      voice->speaking_=false;
       memory::sampleTask("muse-tts");
       replies->release();
     } else ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
   }
 }
+void Voice::audioTask(void *context) {
+  auto *voice=static_cast<Voice *>(context);
+  uint32_t sampled=0;
+  for(;;) {
+    voice->player_.service();
+    if(millis()-sampled>=5000) {sampled=millis();memory::sampleTask("muse-audio");}
+  }
+}
+uint32_t Voice::SpeechIo::now() {return millis();}
+void Voice::SpeechIo::wait(uint32_t ms) {vTaskDelay(pdMS_TO_TICKS(ms));}
+bool Voice::SpeechIo::claim() {return power::claim(power::Load::kAudio);}
+void Voice::SpeechIo::release() {power::release(power::Load::kAudio);}
+bool Voice::SpeechIo::open() {return voice.speaker_.open();}
+void Voice::SpeechIo::close() {
+  voice.speaker_.close();voice.speaking_=false;voice.emotion_=Emotion::Neutral;
+}
+bool Voice::SpeechIo::write(const int16_t *pcm,size_t frames) {return voice.speaker_.write(pcm,frames,cfg::audio::kVolumePercent);}
+void Voice::SpeechIo::level(float value) {voice.outputLevel_=value;}
+void Voice::SpeechIo::playing() {
+  if(!voice.speaking_.exchange(true))Serial.println("[muse-tts] playback started");
+}
+void Voice::SpeechIo::cue(uint8_t emotion,int8_t gesture,int8_t picture) {
+  voice.emotion_=static_cast<Emotion>(emotion);
+  voice.pictures_.fire(picture);
+  if(gesture>=0)speechGesture::request(static_cast<speechGesture::Kind>(gesture),millis(),speechGesture::Speed::Fast,false);
+}
+uint32_t Voice::SpeechIo::drainMs() const {return cfg::audio::kSpeakerDrainMs;}
+float Voice::SpeechIo::fullScale() const {return cfg::audio::kLevelFullScale;}
 bool Voice::playTts(const char *text,uint32_t generation) {
   const auto cancelled=[&] {return replies->cancelled(generation) || toggleRequested_.load() || endRequested_.load();};
   if(!token_[0]) {lastError_="Gateway token missing";return false;}
+  player_.reset();
+  const auto outcome=fetchSpeech(text,generation);
+  // What arrived still plays out, even after a failure, then the slot is free.
+  player_.seal();
+  const uint32_t playoutAt=millis();
+  while(!player_.idle() && !cancelled() && millis()-playoutAt<kPlayoutMs) vTaskDelay(pdMS_TO_TICKS(10));
+  if(!player_.idle()) {
+    player_.stop();
+    while(!player_.idle()) vTaskDelay(1);
+  }
+  pictures_.clear();
+  logPrintf("[muse-tts] finished: code=%u bytes=%u stack_free=%u\n",unsigned(outcome.failure),unsigned(outcome.bytes),unsigned(uxTaskGetStackHighWaterMark(nullptr)));
+  const auto failure=outcome.ok()?player_.failure():outcome.failure;
+  if(failure!=audio::TtsFailure::None && failure!=audio::TtsFailure::Cancelled)lastError_=audio::ttsError(failure);
+  return failure==audio::TtsFailure::None;
+}
+audio::TtsOutcome Voice::fetchSpeech(const char *text,uint32_t generation) {
+  const auto cancelled=[&] {return replies->cancelled(generation) || toggleRequested_.load() || endRequested_.load();};
+  const auto failed=[](audio::TtsFailure failure) {audio::TtsOutcome outcome;outcome.failure=failure;return outcome;};
   const uint32_t networkAt=millis();
   while(!muse::claimTtsNetwork()) {
-    if(cancelled())return false;
-    if(millis()-networkAt>=15000) {lastError_="Speech download busy";return false;}
+    if(cancelled())return failed(audio::TtsFailure::Cancelled);
+    if(millis()-networkAt>=15000)return failed(audio::TtsFailure::Busy);
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   struct NetworkRelease {~NetworkRelease(){muse::releaseTtsNetwork();}} release;
   const size_t bodySize=audio::ttsRequest(text,playback->body,sizeof(playback->body));
-  if(!bodySize) {lastError_="TTS request too large";return false;}
+  if(!bodySize)return failed(audio::TtsFailure::Request);
   audio::TtsHeaders headers;
-  std::string url=std::string("https://")+cfg::voice::kGatewayHost+"/v1/tts";
+  std::string url=std::string("https://")+cfg::voice::kGatewayHost+"/v1/speak";
   esp_http_client_config_t config={};
   config.url=url.c_str();config.method=HTTP_METHOD_POST;
   config.crt_bundle_attach=esp_crt_bundle_attach;
@@ -247,13 +309,14 @@ bool Voice::playTts(const char *text,uint32_t generation) {
     return ESP_OK;
   };
   auto client=esp_http_client_init(&config);
-  if(!client) {lastError_="TTS allocation failed";return false;}
+  if(!client)return failed(audio::TtsFailure::Connect);
   std::string auth=std::string("Bearer ")+token_;
   esp_http_client_set_header(client,"Authorization",auth.c_str());
   esp_http_client_set_header(client,"Content-Type","application/json");
   struct Ops {
     Voice &voice;esp_http_client_handle_t client;audio::TtsHeaders &metadata;uint32_t generation;
-    bool opened=false,claimed=false,started=false;
+    bool opened=false;
+    int8_t picture=-1;
     bool cancelled(){return replies->cancelled(generation)||voice.toggleRequested_||voice.endRequested_;}
     uint32_t now(){return millis();}
     void wait(uint32_t ms){vTaskDelay(pdMS_TO_TICKS(ms));}
@@ -269,24 +332,27 @@ bool Voice::playTts(const char *text,uint32_t generation) {
     bool headers(){return esp_http_client_fetch_headers(client)>=0;}
     int status(){const int s=esp_http_client_get_status_code(client);logPrintf("[muse-tts] HTTP status=%d\n",s);return s;}
     bool audioFormat(){const bool valid=metadata.valid();if(!valid)Serial.println("[muse-tts] invalid/missing PCM headers");return valid;}
-    bool claimAudio(){claimed=power::claim(power::Load::kAudio);return claimed;}
-    bool openSpeaker(){esp_http_client_set_timeout_ms(client,3000);return voice.speaker_.open();}
+    void streaming(){esp_http_client_set_timeout_ms(client,3000);}
     int read(uint8_t *data,size_t size){return esp_http_client_read(client,reinterpret_cast<char *>(data),size);}
     bool complete(){return esp_http_client_is_complete_data_received(client);}
-    bool write(const int16_t *pcm,size_t frames){return voice.speaker_.write(pcm,frames,cfg::audio::kVolumePercent);}
-    void level(float value){voice.outputLevel_=value;}
-    void playing(){if(!started){started=true;Serial.println("[muse-tts] playback started");}voice.speaking_=true;}
-    void drain(){const uint32_t at=millis();while(!cancelled() && millis()-at<cfg::audio::kSpeakerDrainMs)wait(10);}
+    audio::TtsFailure failure(){return voice.player_.failure();}
+    bool cue(const audio::SpeechCue &next){voice.player_.cue(next.emotion,next.gesture,picture);picture=-1;return true;}
+    uint8_t *pictureBuffer(){return voice.pictures_.reserve();}
+    void pictureReady(size_t bytes){picture=voice.pictures_.commit(bytes);}
+    bool pcm(const int16_t *samples,size_t frames){
+      for(;;) {
+        const size_t accepted=voice.player_.push(samples,frames);
+        samples+=accepted;frames-=accepted;
+        if(!frames)return true;
+        if(cancelled() || failure()!=audio::TtsFailure::None)return false;
+        wait(10); // the ring is seconds ahead of the speaker
+      }
+    }
     ~Ops(){
-      voice.speaker_.close();voice.outputLevel_=0;voice.speaking_=false;
-      if(claimed)power::release(power::Load::kAudio);
       if(opened)esp_http_client_close(client);
       esp_http_client_cleanup(client);
     }
   } ops{*this,client,headers,generation};
-  const auto outcome=audio::streamTts(ops,playback->body,bodySize,playback->bytes,playback->pcm);
-  logPrintf("[muse-tts] finished: code=%u bytes=%u stack_free=%u\n",unsigned(outcome.failure),unsigned(outcome.bytes),unsigned(uxTaskGetStackHighWaterMark(nullptr)));
-  if(!outcome.ok() && outcome.failure!=audio::TtsFailure::Cancelled)lastError_=audio::ttsError(outcome.failure);
-  return outcome.ok();
+  return audio::streamTts(ops,playback->body,bodySize,playback->bytes,playback->pcm);
 }
 #endif

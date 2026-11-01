@@ -30,15 +30,16 @@ void Dance::attach(ServoMotion *turn, uint8_t turnHome, ServoMotion *tilt,
 
 void Dance::aim(float turnOffset, float tiltOffset, float degreesPerSecond) {
   // Conversation movements share the small-arc Dance power reservation.
-  turnOffset=fmaxf(-18.0f,fminf(18.0f,turnOffset));
-  tiltOffset=fmaxf(-15.0f,fminf(15.0f,tiltOffset));
-  const float rate = power::servoSpeed(fminf(60.0f,degreesPerSecond));
+  turnOffset=fmaxf(-kMaxYawDegrees,fminf(kMaxYawDegrees,turnOffset));
+  tiltOffset=fmaxf(-kMaxTiltDegrees,fminf(kMaxTiltDegrees,tiltOffset));
+  const float rate = power::servoSpeed(fminf(kMaxDegreesPerSecond,degreesPerSecond));
   if (turn_) turn_->follow(turnHome_ + turnOffset, rate);
   if (tilt_) tilt_->follow(tiltHome_ + tiltOffset, rate);
 }
 
-void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
+void Dance::service(const Voice &voice, uint32_t now) {
   if (!turn_ && !tilt_) return;
+  const Voice::Phase phase = voice.phase();
   if (now - lastTickAt_ < kTickMs) return;
   const float dt = lastTickAt_ == 0 ? kTickMs / 1000.0f : (now - lastTickAt_) / 1000.0f;
   lastTickAt_ = now;
@@ -67,7 +68,7 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
     if(elapsed>=speechGesture::visualDuration(gesture_.speed))gesturing_=visualGesture_=false;
     return;
   }
-  if (phase != Voice::Phase::Speaking) gesturing_=false;
+  if (phase != Voice::Phase::Speaking) {gesturing_=false;beat_=0.0f;}
   if (phase == Voice::Phase::Off) {
     if (!claimed_) return;
     if (!homing_) {
@@ -93,7 +94,9 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
       return;
     case Voice::Phase::Thinking:
     case Voice::Phase::Finishing:
-      aim(kThinkTurnDegrees, kThinkTiltDegrees, kPoseDegreesPerSecond);
+      // A held glance is "waiting"; a slow scan is "working on it".
+      aim(kThinkTurnDegrees + (voice.working() ? kWorkSweepDegrees * sinf(2.0f * PI * kWorkSweepHz * (now % 60000) / 1000.0f) : 0.0f),
+          kThinkTiltDegrees, kPoseDegreesPerSecond);
       return;
     case Voice::Phase::Speaking:
       break;
@@ -112,7 +115,7 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
 
   // Glide between emotions rather than switching gesture in one jump. The
   // phases keep running, so a new tempo picks up where the old one was.
-  const Style &goal = kStyles[static_cast<uint8_t>(emotion)];
+  const Style &goal = kStyles[static_cast<uint8_t>(voice.emotion())];
   style_.yawAmplitude = blend(style_.yawAmplitude, goal.yawAmplitude);
   style_.yawHz = blend(style_.yawHz, goal.yawHz);
   style_.tiltAmplitude = blend(style_.tiltAmplitude, goal.tiltAmplitude);
@@ -124,7 +127,9 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
 
   yawPhase_ = fmodf(yawPhase_ + 2.0f * PI * style_.yawHz * dt, 2.0f * PI);
   tiltPhase_ = fmodf(tiltPhase_ + 2.0f * PI * style_.tiltHz * dt, 2.0f * PI);
-  aim(style_.yaw + style_.yawAmplitude * wave(yawPhase_, style_.snap),
-      style_.tilt + style_.tiltAmplitude * wave(tiltPhase_, style_.snap),
+  beat_ += (voice.outputLevel() - beat_) * kBeatBlend;
+  const float gain = kRestGain + (1.0f - kRestGain) * beat_;
+  aim(style_.yaw + gain * style_.yawAmplitude * wave(yawPhase_, style_.snap),
+      style_.tilt + gain * style_.tiltAmplitude * wave(tiltPhase_, style_.snap) + kBeatTiltDegrees * beat_,
       style_.rate);
 }

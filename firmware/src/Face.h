@@ -10,7 +10,7 @@ class Face {
   static constexpr int16_t kEyesTop=96,kEyesHeight=122;
   static constexpr int16_t kMouthLeft=64,kMouthTop=220,kMouthWidth=112,kMouthHeight=38;
   struct Rect {int16_t x0,y0,x1,y1;};
-  enum class Attention : uint8_t {Idle,Listening,Thinking,Speaking};
+  enum class Attention : uint8_t {Idle,Listening,Thinking,Working,Speaking};
   void reset(uint32_t now);
   void setEmotion(Emotion emotion) {emotion_=uint8_t(emotion)<uint8_t(Emotion::Count)?emotion:Emotion::Neutral;}
   void setAttention(Attention attention) {attention_=attention;}

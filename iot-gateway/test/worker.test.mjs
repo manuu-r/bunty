@@ -411,3 +411,120 @@ test("device TTS refuses an upstream JSON response instead of labelling it as PC
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error.code, "upstream_error");
 });
+
+/** Decode the framed speech stream back into its cues and audio, in order. */
+function readSpeechFrames(bytes) {
+  const frames = [];
+  for (let offset = 0; offset < bytes.length;) {
+    const length = bytes[offset + 1] | (bytes[offset + 2] << 8) | (bytes[offset + 3] << 16);
+    frames.push({ type: bytes[offset], payload: bytes.slice(offset + 4, offset + 4 + length) });
+    offset += 4 + length;
+  }
+  return frames;
+}
+
+function speakRequest(text) {
+  return new Request("https://gateway.example/v1/speak", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${validToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+function pcmResponse(...bytes) {
+  return new Response(new Uint8Array(bytes), { headers: { "content-type": "audio/l16" } });
+}
+
+test("device speech places each sentence's cue exactly before its audio", async () => {
+  const spoken = [];
+  const { env } = makeEnv({
+    AI: {
+      async run(model, input) {
+        assert.equal(model, "@cf/deepgram/aura-1");
+        spoken.push(input.text);
+        return pcmResponse(spoken.length, 0, spoken.length, 0);
+      },
+    },
+  });
+  const response = await worker.fetch(
+    speakRequest("[happy] [nod] [coffee] Bunty is awake. [sad] The coffee is gone."),
+    env,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "application/vnd.bunty.speech;rate=16000;channels=1");
+  assert.equal(response.headers.get("x-audio-byte-order"), "little-endian");
+
+  const frames = readSpeechFrames(new Uint8Array(await response.arrayBuffer()));
+  assert.deepEqual(spoken, ["Bunty is awake.", "The coffee is gone."]);
+  assert.deepEqual(frames.map((frame) => frame.type), [4, 2, 1, 2, 1, 3]);
+  assert.equal(new TextDecoder().decode(frames[0].payload.slice(0, 6)), "GIF89a");
+  assert.equal(new TextDecoder().decode(frames[1].payload), "happy,nod");
+  assert.deepEqual([...frames[2].payload], [1, 0, 1, 0]);
+  assert.equal(new TextDecoder().decode(frames[3].payload), "sad,");
+  assert.deepEqual([...frames[4].payload], [2, 0, 2, 0]);
+  assert.deepEqual([...frames[5].payload], [8, 0, 0, 0]);
+});
+
+test("device speech synthesizes one sentence ahead, not the whole reply at once", async () => {
+  const started = [];
+  const { env } = makeEnv({
+    AI: {
+      async run(_model, input) {
+        started.push(input.text);
+        return pcmResponse(1, 0);
+      },
+    },
+  });
+  const response = await worker.fetch(
+    speakRequest("[happy] First sentence here. [sad] Second sentence here. [soft] Third sentence here."),
+    env,
+  );
+  const reader = response.body.getReader();
+  await reader.read();
+  assert.ok(!started.includes("Third sentence here."));
+  await reader.cancel();
+});
+
+test("device speech returns the upstream status when no audio has started", async () => {
+  const { env } = makeEnv({
+    AI: {
+      async run() {
+        throw Object.assign(new Error("limit"), { status: 429 });
+      },
+    },
+  });
+  const response = await worker.fetch(speakRequest("Hello there friend."), env);
+  assert.equal(response.status, 429);
+  assert.equal((await response.json()).error.code, "ai_budget_or_rate_limit");
+});
+
+test("device speech keeps earlier audio when a later sentence fails", async () => {
+  let calls = 0;
+  const { env } = makeEnv({
+    AI: {
+      async run() {
+        calls += 1;
+        if (calls === 2) throw new Error("second sentence failed");
+        return pcmResponse(7, 0);
+      },
+    },
+  });
+  const response = await worker.fetch(
+    speakRequest("[neutral] First sentence here. [neutral] Second sentence here."),
+    env,
+  );
+  assert.equal(response.status, 200);
+  const frames = readSpeechFrames(new Uint8Array(await response.arrayBuffer()));
+  assert.deepEqual(frames.map((frame) => frame.type), [2, 1, 3]);
+  assert.deepEqual([...frames[2].payload], [2, 0, 0, 0]);
+});
+
+test("device speech refuses text with nothing to say and requires a credential", async () => {
+  const { env, calls } = makeEnv();
+  assert.equal((await worker.fetch(speakRequest("[happy] \u{1F600}"), env)).status, 400);
+  assert.equal((await worker.fetch(new Request("https://gateway.example/v1/speak", {
+    method: "POST", body: JSON.stringify({ text: "Hello" }),
+  }), env)).status, 401);
+  assert.equal((await worker.fetch(new Request("https://gateway.example/v1/speak"), env)).status, 405);
+  assert.equal(calls.length, 0);
+});

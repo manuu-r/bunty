@@ -75,13 +75,17 @@ This header is a description of the gateway's existing PCM convention, not a
 claim of the network-endian RFC audio/L16 encoding. Firmware checks the response
 status/type, handles odd transport boundaries, and rejects incomplete audio.
 The browser `/v1/voice/speak` and legacy `/v1/live` remain available.
+Firmware now speaks through `POST /v1/speak`, which adds expression cues to this
+PCM; see [VOICE.md](VOICE.md#one-clock-for-sound-face-and-head).
 
 Deploy from `iot-gateway/` with `npm run deploy`. No new TTS provider key is
 needed: the existing Workers AI binding and gateway credential are reused.
 
 ## Remote commands
 
-The capabilities are included in Muse's `commands_v2` registration:
+The capabilities are included in Muse's `commands_v2` registration. With
+`cfg::ui::kTextContent` false, `display.show_text` and every `ui.*` tool are
+withheld and rejected, so Muse speaks that content instead:
 
 | Command | Behavior |
 | --- | --- |
@@ -209,7 +213,8 @@ verified; see [RUNTIME.md](RUNTIME.md) for measured heap/stack headroom.
 Seven `ui.*` tools provide calendar/task/note snapshots, information cards,
 navigation, timezone context and state reads. The default idle home is the animated face;
 Recent contains requested content only. Tap the face to talk. Every voice upload now includes
-instructions asking Muse to call `bunty.gesture` before its spoken reply. The
+instructions asking Muse to open each sentence with an expression tag instead of
+calling `bunty.gesture`, which remains for silence and images. The
 device executes small named gestures through the conversation controller,
 and queues manual `bunty.look` movement until that controller releases the head.
 See [UI.md](UI.md) for schemas, pending-task acknowledgment and RAM-only storage.

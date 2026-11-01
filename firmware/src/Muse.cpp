@@ -157,7 +157,7 @@ void muse_link_req_cancel(int64_t id) { noise_ctrl_req_cancel(id); }
 void muse_state_page(bool,int *cols,int *lines) { *cols=26; *lines=2; }
 muse_power_t muse_state_power() { return {-1,0,false,false}; } // No battery telemetry hardware.
 void bunty_muse_register(cJSON *commands) {
-  shell::registerCommands(commands);
+  if(cfg::ui::kTextContent)shell::registerCommands(commands);
   // Override the generic LED-board description with Bunty's actual geometry.
   cJSON *draw=cJSON_GetObjectItem(commands,"display.draw_url");
   if(draw) {
@@ -166,7 +166,7 @@ void bunty_muse_register(cJSON *commands) {
       "Bunty downloads the URL directly; it does not require uploading the image "
       "to another service. Prefer an existing direct image/GIF URL when it meets "
       "the limits. Do not re-upload or generate a replacement for a usable URL. "
-      "For text or structured information, prefer ui.show_card or display.show_text. "
+      "Never use this for images of words: Bunty's screen shows no text. "
       "Use a baseline (not progressive) JPEG, downscaled by 1/2, 1/4 or 1/8 to fit "
       "and centred by default. Or supply raw RGB565, high byte first, 480 bytes "
       "per row, at most 320 rows. Animated GIF87a/GIF89a also supported: "
@@ -272,13 +272,15 @@ void bunty_muse_register(cJSON *commands) {
     cJSON_AddStringToObject(param,"type","string");
     cJSON_AddStringToObject(param,"description",!strcmp(name,"title")?"Optional heading, up to 96 UTF-8 bytes.":"Optional colour as #RRGGBB.");
   }
-  cJSON_AddItemToObject(commands,"display.show_text",show);
+  if(cfg::ui::kTextContent)cJSON_AddItemToObject(commands,"display.show_text",show);
+  else cJSON_Delete(show);
   cJSON *info=cJSON_CreateObject();
   cJSON_AddStringToObject(info,"description","Read Bunty's screen dimensions, supported image/text formats, download state, previous reset reason and free memory. No reboot or hardware changes.");
   cJSON_AddItemToObject(commands,"display.info",info);
   cJSON *gesture=cJSON_AddObjectToObject(commands,"bunty.gesture");
   cJSON_AddStringToObject(gesture,"description",
-    "Choose one small head gesture for the current voice reply: neutral, nod, shake, curious or happy. "
+    "One head gesture: neutral, nod, shake, curious or happy. Not needed for spoken replies, whose "
+    "expression tags already move the head with each sentence; use this for silence and images. "
     "Default auto starts with the next spoken reply or image, whichever comes first; "
     "if an image is already displayed, starts immediately. Set when speech, display or now to choose explicitly. "
     "For memes prefer gesture and speed in display.show_gif or display.draw_url: no extra tool call. "
@@ -326,6 +328,8 @@ void bunty_muse_image_gesture(int kind,int speed) {
   speechGesture::requestVisual(static_cast<speechGesture::Kind>(kind),millis(),static_cast<speechGesture::Speed>(speed));
 }
 cJSON *bunty_muse_command(const char *name,cJSON *params) {
+  if(!cfg::ui::kTextContent&&(!strncmp(name,"ui.",3)||!strcmp(name,"display.show_text")))
+    return result(false,"Bunty shows no text. Say it aloud and add a picture tag.","unsupported");
   if(!strncmp(name,"ui.",3))return shell::command(name,params);
   if(!strcmp(name,"display.show_gif")) {
     cJSON *data=cJSON_GetObjectItem(params,"data_base64"),*row=cJSON_GetObjectItem(params,"row");

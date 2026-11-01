@@ -75,7 +75,7 @@ void Face::advance(uint32_t now){
   for(int i=0;i<2;++i){
     Eye goal=kEyes[mood][i];
     if(attention_==Attention::Listening){goal.height+=5;goal.lid*=.4f;}
-    if(attention_==Attention::Thinking){goal.lid=fmaxf(goal.lid,i==0?.28f:.08f);goal.dy-=2;}
+    if(attention_==Attention::Thinking || attention_==Attention::Working){goal.lid=fmaxf(goal.lid,i==0?.28f:.08f);goal.dy-=2;}
     auto &e=eyes_[i];
     blend(e.width,goal.width,k);blend(e.height,goal.height,k);blend(e.round,goal.round,k);
     blend(e.dy,goal.dy,k);blend(e.lid,goal.lid,k);blend(e.slant,goal.slant,k);blend(e.arc,goal.arc,k);
@@ -84,7 +84,8 @@ void Face::advance(uint32_t now){
     targetX_=(random()-.5f)*8;targetY_=(random()-.5f)*4;
     nextGlanceAt_=now+3200+uint32_t(random()*3000);
   }
-  const float gx=attention_==Attention::Thinking?8:attention_==Attention::Listening?0:targetX_;
+  const float gx=attention_==Attention::Working?8*sinf(float(now%62832)*.0024f):
+    attention_==Attention::Thinking?8:attention_==Attention::Listening?0:targetX_;
   const float gy=attention_==Attention::Listening?-2:targetY_;
   blend(gazeX_,gx,approach(elapsed,85));blend(gazeY_,gy,approach(elapsed,85));
   if(!blinking_ && int32_t(now-nextBlinkAt_)>=0){blinking_=true;blinkAt_=now;}
@@ -148,11 +149,13 @@ Face::Rect Face::drawMouth(Display &display,float open,uint32_t now,uint16_t bac
   if(!isfinite(opacity))opacity=0;
   opacity=clamp(opacity,0,1);
   const auto mood=static_cast<uint8_t>(emotion_);const auto &goal=kMouths[mood];
-  const float k=approach(now-lastMouthAt_,120);lastMouthAt_=now;
+  const uint32_t elapsed=now-lastMouthAt_;lastMouthAt_=now;
+  const float k=approach(elapsed,120);
   blend(mouth_.width,goal.width,k);blend(mouth_.curve,goal.curve,k);
   blend(mouth_.depth,goal.depth,k);blend(mouth_.asym,goal.asym,k);
   if(!isfinite(open))open=0;
-  blend(mouthOpen_,clamp(open,0,1),k);
+  // Lips lead the shape: syllables are about 200 ms, so a slow mouth reads as a wobble.
+  blend(mouthOpen_,clamp(open,0,1),approach(elapsed,open>mouthOpen_?28:70));
   const bool settled=fabsf(mouth_.width-goal.width)<.05f && fabsf(mouth_.curve-goal.curve)<.05f &&
     fabsf(mouth_.depth-goal.depth)<.05f && fabsf(mouth_.asym-goal.asym)<.05f;
   if(settled && mood==lastMouthMood_ && fabsf(mouthOpen_-lastMouthOpen_)<.02f && fabsf(opacity-lastMouthAlpha_)<.01f)return {};

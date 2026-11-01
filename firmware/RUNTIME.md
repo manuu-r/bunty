@@ -12,7 +12,8 @@ must not fall back into the internal heap used by Wi-Fi and DMA.
 | Main | 8,192 | IDF main / core 0 | UI state, framebuffer transactions, power policy, motion arbitration |
 | Muse link | 12,288 | 4 / scheduler | SDK lifecycle and connectivity; SDK also owns its network workers |
 | Muse voice | 8,192 | 4 / scheduler | SDK turn APIs, VAD, microphone ring reader, conversation phase |
-| Muse TTS | 12,288 | 4 / scheduler | Gateway HTTP, speaker I2S, response-slot cleanup |
+| Muse TTS | 12,288 | 4 / scheduler | Gateway HTTP, frame decoding, response-slot cleanup |
+| Muse audio | 4,096 | 5 / core 1 | Speaker I2S and its power claim, playback clock, cues, loudness |
 | Microphone | 4,096 | 6 / core 1 | I2S RX, signal processing, capture ring producer |
 | Touch | 2,560 | 2 / core 1 | I2C and press tracking; bounded event queue |
 | Servo × 2 | 2,048 each | 4 / core 1 | One LEDC channel and trajectory per worker, 20 ms cadence |
@@ -39,6 +40,8 @@ the UI mutex to acquire or release network capacity.
 | VAD pre-roll | PSRAM | 10,240 |
 | Reply mailbox | PSRAM | Four 1,024-byte text slots plus generation/index metadata |
 | TTS scratch | PSRAM | 1,281 network bytes, 640 PCM samples, 6,150-byte JSON body |
+| Speech ring | PSRAM | 131,072 (4 s); its player and atomics stay internal |
+| Reaction pictures | PSRAM | Four 2,048-byte slots; playback then uses the GIF path |
 | LCD staging | Internal DMA | 3,840 |
 | Monochrome fallback | Internal | 9,600 only if color allocation fails |
 

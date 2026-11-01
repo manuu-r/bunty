@@ -16,7 +16,7 @@ class Dance {
   void attach(ServoMotion *turn, uint8_t turnHome, ServoMotion *tilt,
               uint8_t tiltHome);
   // Call from loop(); paces itself. The servos are Dance's while active().
-  void service(Voice::Phase phase, Emotion emotion, uint32_t now);
+  void service(const Voice &voice, uint32_t now);
   bool active() const { return claimed_; }
 
  private:
@@ -36,6 +36,7 @@ class Dance {
   uint32_t homingSince_ = 0;
 
   cfg::dance::Style style_ = cfg::dance::kStyles[0];
+  float beat_ = 0.0f;
   float yawPhase_ = 0.0f;
   float tiltPhase_ = 0.0f;
 };

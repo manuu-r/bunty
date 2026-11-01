@@ -5,6 +5,11 @@ namespace muse {
 bool beginDisplay();
 void serviceDisplay();
 const char *showGifBase64(const char *data,int row=-1);
+// A reaction for the sentence now playing; it yields to content Muse put up on
+// purpose, and ends with the speech.
+bool showSpeechPicture(const uint8_t *data,size_t bytes);
+bool speechPictureActive();
+void endSpeechPicture();
 struct GifTransferReply {const char *error;size_t received,total;bool active,displayed;};
 GifTransferReply transferGif(const char *op,const char *id,size_t bytes,uint32_t crc,int row,size_t offset,const char *data);
 bool displayActive();

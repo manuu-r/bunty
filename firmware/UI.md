@@ -1,5 +1,9 @@
 # Bunty screen shell and Muse tools
 
+> `cfg::ui::kTextContent` is false: the screen shows the face and pictures only.
+> Everything below is withheld from Muse, and the Recent handle is hidden. Muse
+> says this information aloud instead. Setting the flag to true restores it all.
+
 The animated face is the default home. Tap the face to start voice. Tap the
 small bottom handle to open Recent; it contains only previously requested
 Agenda, Tasks, Notes and Info views. No clock dashboard, empty app tiles,
@@ -31,7 +35,7 @@ each voice request instructs Muse to show only content the user asks for.
 | `ui.open` | `home`/`face` restores the companion; `apps` opens Recent. Data views open only if already loaded. |
 | `ui.set_context` | Set `utc_offset_minutes` between -720 and +840; initial +330. |
 | `ui.get_state` | Read active view, loaded flags, counts, tasks and task revision. |
-| `bunty.gesture` | Queue `neutral`, `nod`, `shake`, `curious` or `happy` for the current spoken reply. |
+| `bunty.gesture` | Queue `neutral`, `nod`, `shake`, `curious` or `happy` for silence or images. Spoken replies use expression tags. |
 
 Muse must fetch actual calendar/task/note provider data and send snapshots. This
 firmware does not create a provider connection or periodic refresh. Snapshots

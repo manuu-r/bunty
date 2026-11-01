@@ -17,7 +17,7 @@
 
 namespace {
 muse::ScreenBuffer image;
-std::atomic<bool> active{false},fetching{false};
+std::atomic<bool> active{false},fetching{false},speechPicture{false};
 bool previousActive=false,textVisible=false;
 enum class NetworkOwner { None, Tts, Image };
 std::atomic<NetworkOwner> networkOwner{NetworkOwner::None};
@@ -172,7 +172,7 @@ GifTransferReply transferGif(const char *op,const char *id,size_t bytes,uint32_t
   if(!error&&!ensureGifWorker())error="GIF worker unavailable";
   if(!error) {
     destroyGif(gif);gif=candidate;candidate=nullptr;
-    active=true;textVisible=false;drawGif();speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
+    active=true;speechPicture=false;textVisible=false;drawGif();speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
     strcpy(completedTransfer,id);completedBytes=size;completedAt=now;completedCrc=checksum;completedRow=placement;
     logPrintf("[muse] direct GIF displayed: bytes=%u\n",unsigned(size));
   }
@@ -198,17 +198,39 @@ const char *showGifBase64(const char *data,int row) {
   if(!error) {
     clearTransfer();completedTransfer[0]=0;
     destroyGif(gif);gif=candidate;candidate=nullptr;
-    active=true;textVisible=false;drawGif();speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
+    active=true;speechPicture=false;textVisible=false;drawGif();speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
     logPrintf("[muse] fast GIF displayed: bytes=%u\n",unsigned(bytes));
   }
   destroyGif(candidate);return error;
+}
+bool showSpeechPicture(const uint8_t *data,size_t bytes) {
+  ui::Guard guard;
+  if((active&&!speechPicture)||fetching||!imagesAvailable||!ui::display().ready())return false;
+  if(heap_caps_get_free_size(memory::kExternal)<bytes+1024*1024+2*240*320*2+sizeof(GifStorage))return false;
+  auto *candidate=static_cast<GifStorage *>(memory::external(sizeof(GifStorage)));
+  if(!candidate)return false;
+  new(candidate) GifStorage;
+  candidate->data=static_cast<uint8_t *>(memory::external(bytes));
+  const char *error=candidate->data?nullptr:"GIF memory unavailable";
+  if(!error) {memcpy(candidate->data,data,bytes);error=prepareGif(candidate,bytes,-1);}
+  if(!error&&!ensureGifWorker())error="GIF worker unavailable";
+  if(!error) {
+    destroyGif(gif);gif=candidate;candidate=nullptr;
+    active=true;speechPicture=true;textVisible=false;drawGif();xTaskNotifyGive(gifTask);
+  }
+  destroyGif(candidate);return !error;
+}
+bool speechPictureActive() { return speechPicture; }
+void endSpeechPicture() {
+  ui::Guard guard;
+  if(speechPicture)dismissDisplay();
 }
 bool displayActive() { return active; }
 bool imageFetching() { return fetching; }
 bool claimTtsNetwork() { return claimNetwork(NetworkOwner::Tts); }
 void releaseTtsNetwork() { releaseNetwork(NetworkOwner::Tts); }
 void dismissDisplay() {
-  ui::Guard guard; speechGesture::clearVisual(); clearTransfer(); image.cancel(); active=false; textVisible=false; destroyGif(gif);
+  ui::Guard guard; speechGesture::clearVisual(); clearTransfer(); image.cancel(); active=false; speechPicture=false; textVisible=false; destroyGif(gif);
 }
 void tapDisplay() {
   ui::Guard guard;
@@ -240,12 +262,12 @@ bool bunty_muse_image_end(bool success) {
   releaseNetwork(NetworkOwner::Image);
   if(commit && pendingGif) {
     destroyGif(gif);gif=pendingGif;pendingGif=nullptr;
-    drawGif();textVisible=false;active=true;speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
+    drawGif();textVisible=false;active=true;speechPicture=false;speechGesture::onDisplay(millis());xTaskNotifyGive(gifTask);
   } else if(commit) {
     destroyGif(gif);
     for(int row=0;row<cfg::ui::kScreenHeight;++row)
       ui::display().writeRow(0,row,image.row(row),cfg::ui::kScreenWidth);
-    ui::display().present(); textVisible=false; active=true;speechGesture::onDisplay(millis());
+    ui::display().present(); textVisible=false; active=true;speechPicture=false;speechGesture::onDisplay(millis());
   } else if(current) active=previousActive;
   destroyGif(pendingGif);
   return commit;

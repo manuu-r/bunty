@@ -79,6 +79,10 @@ trap 'rm -rf "$test_dir"' EXIT
 "$test_dir/tts_stream_test"
 
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Isrc tests/host/speech_player_test.cpp -o "$test_dir/speech_player_test"
+"$test_dir/speech_player_test"
+
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
   -I.deps/gfx/include -Itests/host/stubs -Ilib/bunty_platform -Isrc \
   tests/host/voice_screen_test.cpp src/VoiceScreen.cpp src/Fonts.cpp .deps/gfx/Adafruit_GFX.cpp \
   -o "$test_dir/voice_screen_test"

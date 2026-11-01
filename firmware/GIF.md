@@ -1,5 +1,30 @@
 # Animated GIF playback
 
+## Reaction pictures
+
+Bunty reacts to what it says with [22 tiny looping GIFs](docs/bunty-pictures-preview.png):
+sun, moon, cloud, rain, snow, storm, heart, sparkle, party, tear, fire, coffee,
+food, music, idea, check, cross, clock, calendar, mail, search and rocket. The
+largest is 949 bytes and all of them together are under 13 KB. Each is 48x64 with
+eight colours, redrawing only the pixels that change, and the fullscreen zoom
+scales it by exactly five. They are drawn by code in `iot-gateway/src/pictures.js`,
+so a new one is a few lines there plus its tag in the prompt in `adapt_muse.py`;
+a test keeps the two lists equal.
+
+Muse chooses by tag, `[neutral] [rain] Take an umbrella.`, and a reply with no
+picture tag shows the first feeling it expresses: excited is party, happy
+sparkle, soft heart, sad tear, angry fire, curious search. The gateway sends the
+GIF as a frame in the `/v1/speak` stream just before that sentence's cue, so
+showing one costs no tool call or model round trip. The fetch runs seconds ahead
+of playback, so four 2 KiB PSRAM slots hold pictures until their sentence starts;
+the audio task then marks the slot ready and the main loop decodes and draws it. A
+picture stays until a later one replaces it or speech ends, then the face returns.
+It yields to anything Muse displayed on purpose, and a tap interrupts the reply.
+If no slot is free, or a file is too big, the picture is skipped and speech carries on.
+
+While a picture fills the screen the mouth is hidden; the head keeps moving and
+the aura stays composed over it.
+
 Muse can use the existing `display.draw_url` command with a GIF URL:
 
 ```json

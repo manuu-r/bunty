@@ -37,6 +37,9 @@ int main(){
   Ops timeout;timeout.delay=5000;
   assert(muse::uploadBuffered(note,timeout)==muse::UploadResult::Timeout);
   assert(!timeout.ended && timeout.time==60000);
+  {std::vector<int16_t> tailStorage(muse::kUtteranceFrames);muse::UtteranceBuffer tail(tailStorage.data());
+   assert(tail.append(samples.data(),1000));tail.dropTail(400);assert(tail.frames()==600);
+   tail.dropTail(5000);assert(tail.frames()==0);}
   Ops wrapped;wrapped.time=UINT32_MAX-5000;
   assert(muse::uploadBuffered(note,wrapped)==muse::UploadResult::Sent && wrapped.sent==samples);
   Ops offline;offline.online=false;

@@ -23,6 +23,8 @@ class MuseChatTests(unittest.TestCase):
         harness = harness.replace('typedef int SemaphoreHandle_t;', r'''
 static unsigned bunty_reply_count;
 static char bunty_reply_text[1024];
+static bool bunty_agent_busy;
+static void bunty_muse_agent_busy(bool busy) { bunty_agent_busy=busy; }
 static void bunty_muse_reply(const char *text) {
     assert(text && text[0]); ++bunty_reply_count;
     strlcpy(bunty_reply_text,text,sizeof(bunty_reply_text));
@@ -63,8 +65,10 @@ static int64_t muse_link_req_open(''')
     cJSON *text=cJSON_Parse(MUSE_HATCH_NOTE_HEAD MUSE_HATCH_NOTE_TAIL);
     assert(text);
     const char *instruction=cJSON_GetStringValue(cJSON_GetObjectItem(text,"message"));
-    assert(instruction && strstr(instruction,"bunty.gesture") && strstr(instruction,"servo movement"));
-    assert(strstr(instruction,"ui tools") && strstr(instruction,"out of the spoken text"));
+    assert(instruction && strstr(instruction,"bunty.gesture") && strstr(instruction,"one expression tag"));
+    assert(strstr(instruction,"one picture tag") && strstr(instruction,"never spoken aloud"));
+    assert(strstr(instruction,"no text on its screen") && !strstr(instruction,"ui tools") && !strstr(instruction,"display.show_text"));
+    assert(strstr(instruction,"say so first") && strstr(instruction,"gesture and speed in the display.show_gif"));
     assert(strstr(instruction,"Only fetch or show screen content when the user asks"));
     assert(strstr(instruction,"use an existing direct URL") && strstr(instruction,"approval is handled in the Muse app"));
     cJSON *file=cJSON_GetArrayItem(cJSON_GetObjectItem(text,"items"),0);
@@ -110,7 +114,40 @@ static void text_modality(void) {
         harness = harness.replace('for(unsigned i=0;i<4;i++) {', 'for(unsigned i=0;i<3;i++) {')
         harness = harness.replace('assert(s_turn.phase==T_IDLE && strstr(s_turn.error,"LOST CONNECTION"));',
             'assert(s_turn.phase==T_REPLY && !s_turn.error[0]); muse_hatch_turn_cancel();')
-        harness = harness.replace('static void text_modality(void) {', r'''static void recovery(void) {
+        harness = harness.replace('static void text_modality(void) {', r'''static void agent_status(const char *field,const char *value) {
+    char line[160];
+    snprintf(line,sizeof(line),"{\"type\":\"event\",\"event\":\"agent.status\",\"payload\":{\"%s\":\"%s\"}}\n",field,value);
+    sub(line);
+}
+static void task_steps(void) {
+    /* "Let me check", a tool step far past the plain settle, then the answer. */
+    begin();release();note_ack();
+    agent_status("activity_code","running_tool");assert(bunty_agent_busy);
+    final("first","note","Let me check");pump();assert(s_turn.replied);
+    now+=30000000;pump();assert(s_turn.phase==T_REPLY);
+    final("second","note","Here is the answer");pump();
+    assert(bunty_reply_count>=2 && !strcmp(bunty_reply_text,"Here is the answer"));
+    agent_status("activity_code","idle");assert(!bunty_agent_busy);
+    now+=500000;pump();assert(s_turn.phase==T_REPLY);
+    now+=400000;pump();assert(s_turn.phase==T_IDLE && !s_turn.error[0]);
+    muse_hatch_turn_cancel();
+    /* Finished states end the wait whichever field carries them. */
+    begin();release();note_ack();agent_status("status","running");assert(bunty_agent_busy);
+    agent_status("status","idle");assert(!bunty_agent_busy);
+    agent_status("status","running");agent_status("status","completed");assert(!bunty_agent_busy);
+    muse_hatch_turn_cancel();
+    /* A status that never clears can't hold the turn open forever. */
+    begin();release();note_ack();agent_status("status","running");
+    final("first","note","Stuck");pump();
+    now+=59000000;pump();assert(s_turn.phase==T_REPLY);
+    now+=2000000;pump();assert(s_turn.phase==T_IDLE && !s_turn.error[0]);
+    muse_hatch_turn_cancel();
+    /* Without a busy status, even a stale idle one, the plain settle applies. */
+    begin();release();note_ack();agent_status("status","idle");final("first","note","Quiet");pump();
+    now+=2900000;pump();assert(s_turn.phase==T_REPLY);
+    now+=200000;pump();assert(s_turn.phase==T_IDLE);
+}
+static void recovery(void) {
     begin();release();note_ack();final("reply","note","Complete reply");
     feed(RX_SUB,503,NULL,0,true);pump();
     assert(s_turn.phase==T_IDLE && s_turn.replied && !s_turn.error[0]);
@@ -153,17 +190,18 @@ static void text_modality(void) {
 }
 static void text_modality(void) {''')
         harness = harness.replace('case 10: bounded_rejections(); break;', 
-                                  'case 10: bounded_rejections(); break; case 11: reply_then_disconnect(); break; case 12: reply_progress(); break; case 13: recovery(); break;')
+                                  'case 10: bounded_rejections(); break; case 11: reply_then_disconnect(); break; case 12: reply_progress(); break; case 13: recovery(); break; case 14: task_steps(); break;')
         harness += '\ndef test_reply_then_disconnect(self): self.run_case(11)\nChatLinkErrors.test_reply_then_disconnect=test_reply_then_disconnect\ndef test_reply_progress(self): self.run_case(12)\nChatLinkErrors.test_reply_progress=test_reply_progress\n'
         harness = harness.replace('feed(RX_SUB,200,NULL,0,true); assert_replied("Terminal line");',
                                   'feed(RX_SUB,200,NULL,0,true); pump(); assert(s_turn.phase==T_IDLE && s_turn.replied && !s_turn.error[0]);')
         harness = harness.replace('int16_t pcm[1024]={0}; muse_hatch_turn_audio(pcm,1024);',
                                   'int16_t pcm[STAGE_BYTES/2]={0}; muse_hatch_turn_audio(pcm,STAGE_BYTES/2);')
         harness += '\ndef test_transient_stream_recovery(self): self.run_case(13)\nChatLinkErrors.test_transient_stream_recovery=test_transient_stream_recovery\n'
+        harness += '\ndef test_task_steps(self): self.run_case(14)\nChatLinkErrors.test_task_steps=test_task_steps\n'
         namespace = {'__file__': str(path), '__name__': 'bunty_sdk_chat_harness'}
         exec(compile(harness, str(path), 'exec'), namespace)
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(namespace['ChatLinkErrors'])
         output = io.StringIO()
         result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
         self.assertTrue(result.wasSuccessful(), output.getvalue())
-        self.assertEqual(result.testsRun, 14)
+        self.assertEqual(result.testsRun, 15)

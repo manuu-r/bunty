@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 namespace voiceAura {
-enum class State {Off,Listening,Thinking,Speaking,Connecting,Finishing};
+enum class State {Off,Listening,Thinking,Working,Speaking,Connecting,Finishing};
 struct Frame {uint16_t color=0;uint8_t opacity=0;};
 constexpr uint16_t rgb(int r,int g,int b){return uint16_t((r>>3)<<11|(g>>2)<<5|(b>>3));}
 inline Frame blend(Frame a,Frame b,float t) {
@@ -19,6 +19,7 @@ inline Frame frame(State state,uint32_t now,unsigned level=0) {
   switch(state) {
     case State::Listening:return {rgb(193,225,156),uint8_t(5+breath+energy*3/100)};
     case State::Thinking:return {rgb(168,177,245),uint8_t(5+breath)};
+    case State::Working:return {rgb(168,177,245),uint8_t(5+(at%800<400?at%800:800-at%800)*5/400)};
     case State::Speaking:return {rgb(233,241,223),uint8_t(5+energy*6/100)};
     case State::Connecting:
     case State::Finishing:return {rgb(129,149,132),5};

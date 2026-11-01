@@ -259,9 +259,10 @@ if 'Only fetch or show screen content when the user asks' not in (SDK / 'compone
 
 # Existing fitting URLs do not need an artifact upload/hosting step. Any actual
 # Muse-side hosting approval remains controlled by the app, never by firmware.
-replace('components/muse/muse_chat_priv.h',
-        'Keep the companion face for ordinary conversation. Along with the spoken reply,',
-        'Keep the companion face for ordinary conversation. For requested GIFs or images, use an existing direct URL if it meets the device limits; do not upload or recreate a usable image. Use structured ui tools or display.show_text for information instead of making an image. Any necessary image-hosting approval is handled in the Muse app. Along with the spoken reply,')
+if 'one picture tag' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
+    replace('components/muse/muse_chat_priv.h',
+            'Keep the companion face for ordinary conversation. Along with the spoken reply,',
+            'Keep the companion face for ordinary conversation. For requested GIFs or images, use an existing direct URL if it meets the device limits; do not upload or recreate a usable image. Use structured ui tools or display.show_text for information instead of making an image. Any necessary image-hosting approval is handled in the Muse app. Along with the spoken reply,')
 
 # Recover until the bounded turn deadline, without repeating the recording.
 replace('components/muse/muse_chat_link.c',
@@ -294,6 +295,49 @@ replace('main/app.c',
         '        cJSON_AddStringToObject(payload, "format", r->format);',
         '        bunty_muse_image_gesture(ctx->gesture, ctx->speed);\n        cJSON_AddStringToObject(payload, "format", r->format);')
 
-replace('components/muse/muse_chat_priv.h',
-        'Keep movement instructions and tool markup out of the spoken text.',
-        'Keep movement instructions and tool markup out of the spoken text. For spoken-only replies use bunty.gesture with when speech and speed fast. For meme or GIF requests, instead include gesture and speed in the display.show_gif or display.draw_url call so movement starts with the picture even without speech. Choose movement and tempo to match the meme: happy for funny or excited, curious for confused or surprised, nod for agreement, shake for disapproval, neutral for stillness. Prefer fast for energetic memes and normal for calmer ones; use slow only when deliberate slow motion suits the request.')
+if 'one expression tag' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
+    replace('components/muse/muse_chat_priv.h',
+            'Keep movement instructions and tool markup out of the spoken text.',
+            'Keep movement instructions and tool markup out of the spoken text. For spoken-only replies use bunty.gesture with when speech and speed fast. For meme or GIF requests, instead include gesture and speed in the display.show_gif or display.draw_url call so movement starts with the picture even without speech. Choose movement and tempo to match the meme: happy for funny or excited, curious for confused or surprised, nod for agreement, shake for disapproval, neutral for stillness. Prefer fast for energetic memes and normal for calmer ones; use slow only when deliberate slow motion suits the request.')
+
+# Each tag travels with its sentence, so expression lands on the word it belongs
+# to and needs no tool call. A tool round trip per reply also delayed all speech.
+if 'one expression tag' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
+    replace('components/muse/muse_chat_priv.h',
+        'Along with the spoken reply, choose a suitable servo movement by calling bunty.gesture before replying: neutral, nod, shake, curious or happy. Use neutral if no movement suits the reply. The device controls safe angles, speed and power; do not use bunty.look during conversation. Keep movement instructions and tool markup out of the spoken text. For spoken-only replies use bunty.gesture with when speech and speed fast. For meme or GIF requests,',
+        'Along with the spoken reply, perform it: begin every sentence with one expression tag, exactly one of [neutral] [soft] [happy] [excited] [angry] [sad] [curious] [sassy], adding [nod] or [shake] after it when the sentence agrees or disagrees. Bunty acts on each tag with its face and head at the moment that sentence is spoken, and tags are never spoken aloud. Do not call bunty.gesture for spoken replies or bunty.look during conversation. Apart from the tags, write plain speakable sentences with no markdown, lists, emoji or URLs. If a task will take more than a moment, say so first in one short sentence, then do it and give the result in a separate message. For meme or GIF requests,')
+
+# The session path holds a turn open on the agent's status; the link path only
+# timed out, so a result following a slow tool step was never spoken. Mirror the
+# session path, and use the same signal to end a finished turn without waiting.
+replace('components/muse/muse_chat_link.c', '#define SETTLE_US 3000000',
+        '#define BUSY_HOLD_US 60000000LL         /* how long a busy agent keeps a turn open */\n#define IDLE_SETTLE_US 800000LL         /* after the agent reports it has finished */\n#define SETTLE_US 3000000')
+replace('components/muse/muse_chat_link.c', '    char reply_to[80];\n    char text[TEXT_MAX];\n} row_t;',
+        '    char reply_to[80];\n    char activity[24], status[24];\n    char text[TEXT_MAX];\n} row_t;')
+replace('components/muse/muse_chat_link.c',
+        '        } else if (!strcmp(key, "display_text") || !strcmp(key, "content") || !strcmp(key, "text")) {',
+        '        } else if (!strcmp(key, "activity_code")) {\n            ok = read_field(s, r->activity, sizeof(r->activity));\n        } else if (!strcmp(key, "status")) {\n            ok = read_field(s, r->status, sizeof(r->status));\n        } else if (!strcmp(key, "display_text") || !strcmp(key, "content") || !strcmp(key, "text")) {')
+replace('components/muse/muse_chat_link.c', 'static int64_t s_reply_progress_us;',
+        'static int64_t s_reply_progress_us;\nstatic bool s_agent_busy, s_agent_known;')
+replace('components/muse/muse_chat_link.c', '    bool append = !strcmp(s_row.event, "delta.text_append");',
+        '    if (!strcmp(s_row.event, "agent.status") || !strcmp(s_row.event, "task.status")) {\n        const char *state = s_row.activity[0] ? s_row.activity : s_row.status;\n        if (!state[0]) return;\n        s_agent_busy = strcmp(state, "online") && strcmp(state, "idle")\n            && strcmp(state, "completed") && strcmp(state, "failed");\n        /* Idle before any work is the state at subscribe, not a finish. */\n        s_agent_known = s_agent_known || s_agent_busy;\n        bunty_muse_agent_busy(s_agent_busy);\n        return;\n    }\n    bool append = !strcmp(s_row.event, "delta.text_append");')
+replace('components/muse/muse_chat_link.c', '        s_last_seq = 0; s_reply_progress_us = 0;',
+        '        s_last_seq = 0; s_reply_progress_us = 0; s_agent_busy = s_agent_known = false;')
+replace('components/muse/muse_chat_link.c', '    bool skipped_big = s_skipped_big;',
+        '    bool skipped_big = s_skipped_big;\n    bool agent_busy = s_agent_busy, agent_known = s_agent_known;')
+replace('components/muse/muse_chat_link.c',
+        '    if (s_turn.replied) {\n        if ((scroll(now) || CONFIG_BUNTY_MUSE)',
+        '#if CONFIG_BUNTY_MUSE\n    if (s_turn.replied) {\n        scroll(now);\n        int64_t quiet = now - (progress > s_turn.t_reply ? progress : s_turn.t_reply);\n        if (quiet > (!agent_known ? SETTLE_US : agent_busy ? BUSY_HOLD_US : IDLE_SETTLE_US)) {\n            end_turn();\n            emit(MUSE_HATCH_EV_DONE, NULL);\n        }\n        return;\n    }\n#endif\n    if (s_turn.replied) {\n        if ((scroll(now) || CONFIG_BUNTY_MUSE)')
+
+# Words never reach the screen. Information is spoken, and a tiny picture chosen
+# by tag travels inside the speech stream, so showing one costs no tool call.
+if 'one picture tag' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
+    replace('components/muse/muse_chat_priv.h',
+            'When asked to show calendar events, tasks, notes or information, use the registered ui tools with real available data.',
+            'Bunty has no text on its screen, so give calendars, tasks, notes and information aloud and briefly from real available data.')
+    replace('components/muse/muse_chat_priv.h',
+            'Use structured ui tools or display.show_text for information instead of making an image.',
+            'Never show images of words.')
+    replace('components/muse/muse_chat_priv.h',
+            'and tags are never spoken aloud.',
+            'and tags are never spoken aloud. Right after the expression tag of the sentence it suits, add one picture tag: [sun] [moon] [cloud] [rain] [snow] [storm] [heart] [sparkle] [party] [tear] [fire] [coffee] [food] [music] [idea] [check] [cross] [clock] [calendar] [mail] [search] [rocket]. It fills the screen from that sentence until Bunty stops speaking, so choose what the reply is about or how it feels, at most one or two per reply.')

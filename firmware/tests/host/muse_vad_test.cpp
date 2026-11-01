@@ -27,9 +27,12 @@ int main() {
   assert(frame(vad,2000)==Event::None);
   for (int i=0;i<44;++i) assert(frame(vad,100)==Event::None);
   assert(frame(vad,100)==Event::Ended);
-  vad.reset(); start(vad);
+  // The 900 ms endpoint is silence nobody needs to upload; 250 ms stays.
+  assert(vad.excessQuiet()==14400-muse::Vad::kTailFrames);
+  vad.reset(); assert(vad.excessQuiet()==0); start(vad);
   for (int i=0;i<1494;++i) assert(frame(vad,2000)==Event::None);
   assert(frame(vad,2000)==Event::Ended);  // 30-second safety cap.
+  assert(vad.excessQuiet()==0);           // cut off mid-speech: keep every word.
   vad.reset();
   assert(vad.process(nullptr,0)==Event::None);
   assert(!vad.speaking());

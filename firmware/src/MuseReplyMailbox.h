@@ -25,8 +25,9 @@ class ReplyMailbox {
     const auto tail=tail_.load();
     return tail==head_.load()?nullptr:&slots_[tail%kCapacity];
   }
-  void release() { tail_.fetch_add(1); }
-  void cancel() { generation_.fetch_add(1); }
+  // Each index has one writer, and PSRAM can't be trusted with atomic read-modify-write.
+  void release() { tail_.store(tail_.load()+1); }
+  void cancel() { generation_.store(generation_.load()+1); }
   bool cancelled(uint32_t generation) const { return generation!=generation_.load(); }
   bool empty() const { return head_.load()==tail_.load(); }
  private:

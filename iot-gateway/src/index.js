@@ -12,6 +12,7 @@ import {
   splitEmotion,
 } from "./live.js";
 import { readInferenceRequest, RequestValidationError } from "./request.js";
+import { speechSegments, speechStream } from "./speech.js";
 import { voiceLoginPage, voiceUiPage } from "./voice-ui.js";
 
 const INFERENCE_ROUTE = "/v1/infer";
@@ -70,6 +71,10 @@ export default {
 
     if (url.pathname === "/v1/tts") {
       return handleDeviceSpeak(request, env);
+    }
+
+    if (url.pathname === "/v1/speak") {
+      return handleDeviceSpeech(request, env);
     }
 
     if (url.pathname === VOICE_SPEAK_ROUTE) {
@@ -252,6 +257,131 @@ async function handleDeviceSpeak(request, env) {
 }
 
 /**
+ * Device speech with its performance: tagged reply text in, PCM framed with
+ * expression cues out. See speech.js. Like /v1/tts, this calls no STT or LLM.
+ * @param {Request} request
+ * @param {Record<string, any>} env
+ */
+async function handleDeviceSpeech(request, env) {
+  if (request.method !== "POST") {
+    return errorResponse("method_not_allowed", "Use POST for this endpoint.", 405, { Allow: "POST" });
+  }
+  const authentication = await authenticateRequest(request, env);
+  if (authentication.response) return authentication.response;
+  const device = authentication.device;
+
+  const speech = await readSpeechRequest(request, env, device.id);
+  if (speech.response) return speech.response;
+  const { config, text } = speech;
+
+  const segments = speechSegments(text);
+  if (segments.length === 0) {
+    return errorResponse("invalid_request", "There is nothing to say in that text.", 400);
+  }
+
+  const requestId = `${device.id}:speak:${crypto.randomUUID()}`;
+  const audioBody = async (segment) => {
+    const response = audioResponse(await synthesize(env, config, segment, device.id, requestId));
+    if ((response.headers.get("Content-Type") || "").includes("json")) {
+      throw new TypeError("TTS returned JSON instead of audio.");
+    }
+    return response.body;
+  };
+
+  let firstBody;
+  try {
+    firstBody = await audioBody(segments[0].text);
+  } catch (error) {
+    return speechFailure(error, requestId);
+  }
+  const body = speechStream(segments, firstBody, audioBody, (error) => {
+    logFailure("device_speech_interrupted", error, { requestId });
+  });
+  return new Response(body, {
+    headers: {
+      "Content-Type": `application/vnd.bunty.speech;rate=${config.liveAudioSampleRate};channels=1`,
+      "X-Audio-Byte-Order": "little-endian",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+/**
+ * Rate limit, then read and bound the requested speech text.
+ * @param {Request} request
+ * @param {Record<string, any>} env
+ * @param {string} limitKey
+ */
+async function readSpeechRequest(request, env, limitKey) {
+  const rateLimitResponse = await enforceRateLimit(env.DEVICE_RATE_LIMITER, limitKey, "tts");
+  if (rateLimitResponse) return { response: rateLimitResponse };
+
+  let config;
+  try {
+    config = readConfig(env);
+  } catch (error) {
+    logFailure("worker_configuration_invalid", error);
+    return { response: errorResponse("service_unavailable", "Gateway configuration is invalid.", 503) };
+  }
+
+  let body;
+  try {
+    body = await readSmallJson(request, config.maxRequestBytes);
+  } catch {
+    return { response: errorResponse("invalid_request", "Could not read the speech request.", 400) };
+  }
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text || text.length > config.maxTtsChars) {
+    return {
+      response: errorResponse(
+        "invalid_request",
+        `Speech must be between 1 and ${config.maxTtsChars} characters.`,
+        400,
+      ),
+    };
+  }
+  return { config, text };
+}
+
+/**
+ * @param {Record<string, any>} env
+ * @param {ReturnType<typeof readConfig>} config
+ * @param {string} text
+ * @param {string} actorId
+ * @param {string} requestId
+ */
+function synthesize(env, config, text, actorId, requestId) {
+  return env.AI.run(
+    config.ttsModel,
+    {
+      text,
+      speaker: config.ttsSpeaker,
+      encoding: "linear16",
+      container: "none",
+      sample_rate: config.liveAudioSampleRate,
+    },
+    { returnRawResponse: true, ...aiOptions(config, actorId, requestId) },
+  );
+}
+
+/** @param {unknown} error @param {string} requestId */
+function speechFailure(error, requestId) {
+  const upstreamStatus = Number(error?.status);
+  const rateLimited = upstreamStatus === 429;
+  logFailure("voice_ui_tts_failed", error, {
+    requestId,
+    upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : undefined,
+  });
+  return errorResponse(
+    rateLimited ? "ai_budget_or_rate_limit" : "upstream_error",
+    rateLimited ? "AI usage limit reached. Try again later." : "Bunty could not speak that reply.",
+    rateLimited ? 429 : 502,
+    rateLimited ? { "Retry-After": "60" } : undefined,
+  );
+}
+
+/**
  * Synthesizes a browser UI reply with the same trusted Aura voice used by the
  * live Bunty pipeline. This keeps browser fallback audio out of platform TTS.
  * @param {Request} request
@@ -275,49 +405,13 @@ async function handleVoiceUiSpeak(request, env, device = null) {
     }
   }
 
-  const rateLimitResponse = await enforceRateLimit(
-    env.DEVICE_RATE_LIMITER,
-    device?.id || "voice-ui",
-    "tts",
-  );
-  if (rateLimitResponse) return rateLimitResponse;
-
-  let config;
-  try {
-    config = readConfig(env);
-  } catch (error) {
-    logFailure("worker_configuration_invalid", error);
-    return errorResponse("service_unavailable", "Gateway configuration is invalid.", 503);
-  }
-
-  let body;
-  try {
-    body = await readSmallJson(request, config.maxRequestBytes);
-  } catch {
-    return errorResponse("invalid_request", "Could not read the speech request.", 400);
-  }
-  const text = typeof body.text === "string" ? body.text.trim() : "";
-  if (!text || text.length > config.maxTtsChars) {
-    return errorResponse(
-      "invalid_request",
-      `Speech must be between 1 and ${config.maxTtsChars} characters.`,
-      400,
-    );
-  }
+  const speech = await readSpeechRequest(request, env, device?.id || "voice-ui");
+  if (speech.response) return speech.response;
+  const { config, text } = speech;
 
   const requestId = `${device ? device.id : "voice-ui"}:tts:${crypto.randomUUID()}`;
   try {
-    const audio = await env.AI.run(
-      config.ttsModel,
-      {
-        text,
-        speaker: config.ttsSpeaker,
-        encoding: "linear16",
-        container: "none",
-        sample_rate: config.liveAudioSampleRate,
-      },
-      { returnRawResponse: true, ...aiOptions(config, device?.id || "voice-ui", requestId) },
-    );
+    const audio = await synthesize(env, config, text, device?.id || "voice-ui", requestId);
     const response = audioResponse(audio);
     if (device) {
       if ((response.headers.get("Content-Type") || "").includes("json")) {
@@ -331,18 +425,7 @@ async function handleVoiceUiSpeak(request, env, device = null) {
     }
     return response;
   } catch (error) {
-    const upstreamStatus = Number(error?.status);
-    const rateLimited = upstreamStatus === 429;
-    logFailure("voice_ui_tts_failed", error, {
-      requestId,
-      upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : undefined,
-    });
-    return errorResponse(
-      rateLimited ? "ai_budget_or_rate_limit" : "upstream_error",
-      rateLimited ? "AI usage limit reached. Try again later." : "Bunty could not speak that reply.",
-      rateLimited ? 429 : 502,
-      rateLimited ? { "Retry-After": "60" } : undefined,
-    );
+    return speechFailure(error, requestId);
   }
 }
 
