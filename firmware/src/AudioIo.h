@@ -2,6 +2,7 @@
 
 #include "Runtime.h"
 #include <atomic>
+#include "CaptureGate.h"
 #include <driver/i2s_std.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/stream_buffer.h>
@@ -15,14 +16,14 @@ class Microphone {
   bool begin();
   bool available() const { return available_; }
 
-  void setCapturing(bool capturing) { capturing_ = capturing; }
+  void setCapturing(bool capturing);
   // Blocks up to waitMs for at least one byte; returns bytes copied.
   size_t read(uint8_t *destination, size_t bytes, uint32_t waitMs);
   // Only the ring's reader may call this.
   void discard();
   size_t buffered() const;
 
-  // RMS of the most recent 20 ms, updated whether or not capture is on.
+  // RMS of the most recent captured 20 ms; zero while capture is off.
   uint32_t level() const { return level_; }
 
  private:
@@ -33,7 +34,7 @@ class Microphone {
   StreamBufferHandle_t ring_ = nullptr;
   StaticStreamBuffer_t ringControl_ = {};
   std::atomic<bool> available_{false};
-  std::atomic<bool> capturing_{false};
+  audio::CaptureGate capture_;
   std::atomic<uint32_t> level_{0};
   std::atomic<uint32_t> dropped_{0};
 

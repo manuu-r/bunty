@@ -56,6 +56,6 @@ bool ledcAttachPin(int pin,uint8_t channel);
 void ledcDetachPin(int pin);
 void ledcWrite(uint8_t channel,uint32_t duty);
 void configTime(long,long,const char *,const char *,const char *);
-void platformInit();
+bool platformInit();
 
 bool setCpuFrequencyMhz(uint32_t mhz);

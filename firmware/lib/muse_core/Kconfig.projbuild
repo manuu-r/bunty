@@ -1,0 +1,10 @@
+config BUNTY_MUSE
+    bool "Use Muse for Bunty's assistant connection"
+    default y
+config MUSE_ENABLED
+    bool
+    default n
+config MUSE_HATCH
+    bool
+    default n
+rsource "../../.deps/muse/esp32/main/Kconfig.projbuild"

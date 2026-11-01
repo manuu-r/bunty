@@ -25,13 +25,6 @@ int16_t clip16(int32_t value) {
   return static_cast<int16_t>(value);
 }
 
-// Removes the capsule's DC offset: a one-pole high-pass at roughly 5 Hz, kept
-// in Q8 so the tracked offset does not stall on integer truncation.
-int32_t removeDc(int32_t sample, int32_t &state) {
-  state += ((sample << 8) - state) >> 9;
-  return sample - (state >> 8);
-}
-
 }  // namespace
 
 // ------------------------------------------------------------- Microphone ---
@@ -63,6 +56,7 @@ bool Microphone::begin() {
     Serial.println("[mic] could not initialize the I2S channel");
     if (channel_) i2s_del_channel(channel_);
     channel_ = nullptr;
+    if(ring_) vStreamBufferDelete(ring_);
     heap_caps_free(storage);
     ring_ = nullptr;
     return false;
@@ -73,6 +67,7 @@ bool Microphone::begin() {
     i2s_channel_disable(channel_);
     i2s_del_channel(channel_);
     channel_ = nullptr;
+    if(ring_) vStreamBufferDelete(ring_);
     heap_caps_free(storage);
     ring_ = nullptr;
     return false;
@@ -95,7 +90,17 @@ void Microphone::task(void *context) {
   }
 }
 
+void Microphone::setCapturing(bool capturing) {
+  capture_.enable(capturing);
+  if(!capturing) {
+    // Wait only for an in-flight nonblocking ring write, not an I2S read.
+    while(capture_.writing()) vTaskDelay(1);
+    level_=0;
+  }
+}
+
 void Microphone::readOnce() {
+  const uint32_t session=capture_.session();
   static int32_t slots[kReadFrames * 2];
   static int16_t mono[kReadFrames];
   // Which capsules are actually wired, reported only when it changes.
@@ -109,12 +114,14 @@ void Microphone::readOnce() {
   }
   size_t bytesRead = 0;
   if (i2s_channel_read(channel_, slots, sizeof(slots), &bytesRead, 100) != ESP_OK || bytesRead == 0) {
+    vTaskDelay(pdMS_TO_TICKS(10));
     return;
   }
+  if(!capture_.current(session)) return; // drain DMA while idle, skip DSP
   const size_t frames = bytesRead / (2 * sizeof(int32_t));
   for (size_t i = 0; i < frames; ++i) {
-    const int32_t left = removeDc(slots[2 * i] >> cfg::audio::kMicShift, dcLeft_);
-    const int32_t right = removeDc(slots[2 * i + 1] >> cfg::audio::kMicShift, dcRight_);
+    const int32_t left = audio::removeDc(slots[2 * i] >> cfg::audio::kMicShift, dcLeft_);
+    const int32_t right = audio::removeDc(slots[2 * i + 1] >> cfg::audio::kMicShift, dcRight_);
     // Slowly tracked per-slot energy decides which capsules are really wired.
     energyLeft_ += uint64_t(int64_t(left) * left) - (energyLeft_ >> 12);
     energyRight_ += uint64_t(int64_t(right) * right) - (energyRight_ >> 12);
@@ -140,9 +147,10 @@ void Microphone::readOnce() {
     levelSum_ = 0;
     levelCount_ = 0;
   }
-  if (!capturing_ || frames == 0) return;
+  if (frames == 0 || !capture_.beginWrite(session)) return;
   const size_t bytes = frames * sizeof(int16_t);
   const size_t sent = xStreamBufferSend(ring_, mono, bytes, 0);
+  capture_.endWrite();
   if (sent != bytes) dropped_ += bytes - sent;
 }
 

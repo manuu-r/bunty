@@ -14,6 +14,8 @@ inline void *external(size_t bytes) { return heap_caps_malloc(bytes, kExternal);
 inline void *internal(size_t bytes) { return heap_caps_malloc(bytes, kInternal); }
 void sampleTask(const char *name);
 void report();
+// Main-loop work only (excludes its deliberate sleep), reset at each report.
+void recordLoop(uint32_t microseconds);
 
 // A bounded, reusable ArduinoJson arena. No system heap calls during parsing.
 // The document must be destroyed BEFORE reset; realloc preserves old contents.

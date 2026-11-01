@@ -7,6 +7,10 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/scrip
 if(NOT BUNTY_DEPS_RESULT EQUAL 0)
     message(FATAL_ERROR "Could not prepare Bunty dependencies")
 endif()
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/scripts/adapt_muse.py"
+                COMMAND_ERROR_IS_FATAL ANY)
+list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/.deps/muse/esp32/components/noise_core"
+                                "${CMAKE_CURRENT_LIST_DIR}/.deps/muse/esp32/components/product_info")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(bunty VERSION 0.1.0)
 include($ENV{IDF_PATH}/tools/cmake/version.cmake)

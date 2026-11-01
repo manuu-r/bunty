@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Face.h"
+#include "Fonts.h"
 #include "flow32/graphics/Display.h"
 
 extern "C" void *__real_malloc(size_t size) { return std::malloc(size); }
@@ -18,9 +19,10 @@ struct Panel : DisplayTransport {
   std::vector<uint16_t> screen = std::vector<uint16_t>(240 * 320);
   bool begin(const DisplayPanel &) override { return true; }
   void end() override {}
-  void present(const uint16_t *data, int16_t x, int16_t y, int16_t w, int16_t h, int16_t stride) override {
+  bool present(const uint16_t *data, int16_t x, int16_t y, int16_t w, int16_t h, int16_t stride) override {
     for (int row = 0; row < h; ++row)
       for (int col = 0; col < w; ++col) screen[(y + row) * 240 + x + col] = data[row * stride + col];
+    return true;
   }
 };
 
@@ -29,8 +31,9 @@ int main(int argc, char **argv) {
   const float open = argc > 2 ? std::atof(argv[2]) : 0.5f;
   const uint32_t at = argc > 3 ? std::atoi(argv[3]) : 700;
   constexpr uint16_t kBackground = ((6 & 0xF8) << 8) | ((8 & 0xFC) << 3) | (15 >> 3);
-  constexpr int kCount = static_cast<int>(Emotion::Count), kCols = 4;
-  constexpr int kW = 240, kH = 230, kTop = 70;  // eyes and mouth only
+  constexpr int kEmotions=static_cast<int>(Emotion::Count),kCount=kEmotions+4,kCols=4;
+  constexpr const char *names[]={"NEUTRAL","SOFT","HAPPY","EXCITED","FOCUSED","SAD","CURIOUS","SASSY","IDLE","LISTENING","THINKING","SPEAKING"};
+  constexpr int kW=240,kH=280,kTop=32;
   const int rows = (kCount + kCols - 1) / kCols;
   std::vector<uint8_t> sheet(size_t(kW * kCols) * kH * rows * 3, 40);
 
@@ -43,13 +46,16 @@ int main(int argc, char **argv) {
     if (!display.begin()) return 1;
     display.clear(kBackground);
     Face face;
-    face.setEmotion(static_cast<Emotion>(e));
+    face.setEmotion(e<kEmotions?static_cast<Emotion>(e):Emotion::Neutral);
+    if(e>=kEmotions)face.setAttention(static_cast<Face::Attention>(e-kEmotions));
     face.reset(0);
     // Advance in small steps, as the firmware does, so tweens and blinks run.
     for (uint32_t t = 0; t <= at; t += 60) {
       face.drawEyes(display, t, kBackground);
-      face.drawMouth(display, open, t, kBackground);
+      face.drawMouth(display, e==kEmotions+3?.7f:open, t, kBackground);
     }
+    display.setFont(BuntyFonts::kBody);display.setTextColor(uint16_t((142>>3)<<11|(151>>2)<<5|(172>>3)));
+    display.setTextSize(1);display.setTextWrap(false);display.setCursor(16,60);display.print(names[e]);
     display.present();
     const int ox = (e % kCols) * kW, oy = (e / kCols) * kH;
     for (int y = 0; y < kH; ++y)

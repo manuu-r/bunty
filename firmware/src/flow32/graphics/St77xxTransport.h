@@ -12,14 +12,14 @@ struct St77xxConfig {
   uint32_t spiHz=40000000;
 };
 // Native LCD transport. Each call waits for DMA completion because Flow32
-// reuses its single internal line buffer immediately after present returns.
+// reuses its bounded internal DMA buffer immediately after present returns.
 class St77xxTransport final : public DisplayTransport {
  public:
   explicit St77xxTransport(const St77xxConfig &config):config_(config) {}
   ~St77xxTransport() override { end(); }
   bool begin(const DisplayPanel &panel) override;
   void end() override;
-  void present(const uint16_t *pixels,int16_t x,int16_t y,int16_t width,
+  bool present(const uint16_t *pixels,int16_t x,int16_t y,int16_t width,
                int16_t height,int16_t stride) override;
  private:
   static bool completed(esp_lcd_panel_io_handle_t,esp_lcd_panel_io_event_data_t *,void *);

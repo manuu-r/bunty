@@ -13,8 +13,7 @@ namespace {
 
 using namespace cfg::power;
 
-Preferences *storage_ = nullptr;
-Mode mode_ = Mode::kNormal;
+std::atomic<Mode> mode_{Mode::kNormal};
 bool brownout_ = false;
 uint32_t startedAt_ = 0;
 
@@ -22,19 +21,16 @@ uint32_t startedAt_ = 0;
 // loads both believe they fit.
 portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
 bool claimed_[static_cast<size_t>(Load::kCount)] = {};
+bool refused_[static_cast<size_t>(Load::kCount)] = {};
 
 bool txPowerApplied_ = false;
+bool txRadioAwake_ = false;
 
-uint32_t lastBusyAt_ = 0;
+std::atomic<uint32_t> lastBusyAt_{0};
 bool idle_ = false;
 bool radioSleeping_ = false;
+bool radioSleepApplied_ = false;
 std::atomic<bool> radioAwake_{false};
-
-uint32_t usedMilliampSeconds_ = 0;
-uint32_t lastAccountedAt_ = 0;
-uint32_t lastPersistedAt_ = 0;
-constexpr uint32_t kCapacityMilliampSeconds =
-    static_cast<uint32_t>(kBatteryMilliampHours) * 3600u;
 
 uint16_t loadMilliamps(Load load) {
   switch (load) {
@@ -56,38 +52,20 @@ uint16_t committedLocked() {
 }
 
 void setRadioSleep(bool sleep) {
-  if (radioSleeping_ == sleep) return;
-  radioSleeping_ = sleep;
-  WiFi.setSleep(sleep);
+  if (radioSleepApplied_ && radioSleeping_ == sleep) return;
+  if (WiFi.setSleep(sleep)) { radioSleeping_ = sleep; radioSleepApplied_ = true; }
 }
 
 void setIdle(bool idle) {
   if (idle_ == idle) return;
-  idle_ = idle;
-  setCpuFrequencyMhz(idle ? kIdleCpuMhz : kActiveCpuMhz);
-}
-
-void accountFuel(uint32_t now) {
-  const uint32_t elapsed = now - lastAccountedAt_;
-  if (elapsed < 1000) return;
-  lastAccountedAt_ = now;
-  usedMilliampSeconds_ += committedMilliamps() * (elapsed / 1000);
-
-  if (storage_ && now - lastPersistedAt_ >= kFuelPersistMs) {
-    lastPersistedAt_ = now;
-    storage_->putUInt(cfg::nvs::kFuelUsed, usedMilliampSeconds_);
-  }
+  if(setCpuFrequencyMhz(idle ? kIdleCpuMhz : kActiveCpuMhz)) idle_ = idle;
 }
 
 }  // namespace
 
 void begin(Preferences &storage) {
-  storage_ = &storage;
   startedAt_ = millis();
   lastBusyAt_ = startedAt_;
-  lastAccountedAt_ = startedAt_;
-  lastPersistedAt_ = startedAt_;
-  usedMilliampSeconds_ = storage.getUInt(cfg::nvs::kFuelUsed, 0);
 
   brownout_ = esp_reset_reason() == ESP_RST_BROWNOUT;
   if (brownout_) {
@@ -111,11 +89,10 @@ void begin(Preferences &storage) {
 
 bool claim(Load load) {
   if (load == Load::kCount) return false;
-  if (mode_ == Mode::kSaver && load != Load::kAudio) return false;
   const size_t index = static_cast<size_t>(load);
   const uint16_t headroom = kRailMilliamps - kReserveMilliamps;
 
-  bool granted = false;
+  bool granted = false, reportRefusal = false;
 
   taskENTER_CRITICAL(&lock_);
   if (claimed_[index]) {
@@ -124,10 +101,12 @@ bool claim(Load load) {
     claimed_[index] = true;
     granted = true;
   }
+  reportRefusal = !granted && !refused_[index];
+  refused_[index] = !granted;
   taskEXIT_CRITICAL(&lock_);
 
   if (!granted) {
-    logPrintf("[power] refused a %u mA load; %u mA already committed\n",
+    if(reportRefusal) logPrintf("[power] refused a %u mA load; %u mA already committed\n",
               static_cast<unsigned>(loadMilliamps(load)),
               static_cast<unsigned>(committedMilliamps()));
     return false;
@@ -147,7 +126,10 @@ void release(Load load) {
 
 bool held(Load load) {
   if (load == Load::kCount) return false;
-  return claimed_[static_cast<size_t>(load)];
+  taskENTER_CRITICAL(&lock_);
+  const bool value=claimed_[static_cast<size_t>(load)];
+  taskEXIT_CRITICAL(&lock_);
+  return value;
 }
 
 uint16_t committedMilliamps() {
@@ -158,48 +140,42 @@ uint16_t committedMilliamps() {
 }
 
 void markBusy() {
+  // Workers only request activity; the main task owns CPU/driver reconfiguration.
   lastBusyAt_ = millis();
-  setIdle(false);
 }
 
-void setRadioAwake(bool awake) {
-  if (radioAwake_.exchange(awake) == awake) return;
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFi.setTxPower(static_cast<wifi_power_t>(awake ? kVoiceTxPowerQuarterDbm
-                                                     : kWifiTxPowerQuarterDbm));
-  }
-}
+void setRadioAwake(bool awake) { radioAwake_=awake; }
 
 void service() {
   const uint32_t now = millis();
-  accountFuel(now);
 
   bool busy = false;
+  taskENTER_CRITICAL(&lock_);
   for (size_t i = 0; i < static_cast<size_t>(Load::kCount); ++i) busy |= claimed_[i];
-  setIdle(!busy && now - lastBusyAt_ >= kIdleAfterMs);
+  taskEXIT_CRITICAL(&lock_);
+  const uint32_t lastBusy=lastBusyAt_.load();
+  setIdle(!busy && !radioAwake_ && static_cast<int32_t>(now-lastBusy) >= int32_t(kIdleAfterMs));
   setRadioSleep(!radioAwake_);
-  if (!txPowerApplied_ && WiFi.status() == WL_CONNECTED) {
-    txPowerApplied_ = true;
-    WiFi.setTxPower(static_cast<wifi_power_t>(kWifiTxPowerQuarterDbm));
-    logPrintf("[power] Wi-Fi transmit capped at %d dBm\n",
-              kWifiTxPowerQuarterDbm / 4);
+  const bool awake=radioAwake_.load();
+  if(WiFi.status()!=WL_CONNECTED) txPowerApplied_=false;
+  else if(!txPowerApplied_ || txRadioAwake_!=awake) {
+    const int8_t target=awake?kVoiceTxPowerQuarterDbm:kWifiTxPowerQuarterDbm;
+    if(WiFi.setTxPower(target)) {
+      txPowerApplied_=true; txRadioAwake_=awake;
+      logPrintf("[power] Wi-Fi transmit capped at %d dBm\n",target/4);
+    }
   }
 
   if (mode_ == Mode::kConservative && now - startedAt_ >= kConservativeMs) {
     mode_ = Mode::kNormal;
     Serial.println("[power] no further brown-outs; back to full power");
   }
-  if (kSaverPercent > 0 && mode_ == Mode::kNormal &&
-      estimatedPercentRemaining() <= kSaverPercent) {
-    mode_ = Mode::kSaver;
-    Serial.println("[power] modelled charge is low; shedding load");
-  }
+
 }
 
 uint8_t backlightCeiling() {
-  switch (mode_) {
+  switch (mode_.load()) {
     case Mode::kConservative: return kConservativeBacklight;
-    case Mode::kSaver: return kSaverBacklight;
     case Mode::kNormal: break;
   }
   return 255;
@@ -216,28 +192,13 @@ float servoSpeed(float requestedDegreesPerSecond) {
 Mode mode() { return mode_; }
 
 const char *modeName() {
-  switch (mode_) {
+  switch (mode_.load()) {
     case Mode::kConservative: return "conservative";
-    case Mode::kSaver: return "saver";
     case Mode::kNormal: break;
   }
   return "normal";
 }
 
 bool recoveredFromBrownout() { return brownout_; }
-
-uint8_t estimatedPercentRemaining() {
-  if (usedMilliampSeconds_ >= kCapacityMilliampSeconds) return 0;
-  const uint32_t left = kCapacityMilliampSeconds - usedMilliampSeconds_;
-  return static_cast<uint8_t>(left * 100u / kCapacityMilliampSeconds);
-}
-
-void resetFuelGauge() {
-  usedMilliampSeconds_ = 0;
-  lastAccountedAt_ = millis();
-  if (storage_) storage_->putUInt(cfg::nvs::kFuelUsed, 0);
-  if (mode_ == Mode::kSaver) mode_ = Mode::kNormal;
-  Serial.println("[power] fuel gauge reset");
-}
 
 }  // namespace power

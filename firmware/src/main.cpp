@@ -2,7 +2,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_netif.h>
-#include <esp_random.h>
+#include <esp_system.h>
 #include <time.h>
 
 #include "Animations.h"
@@ -10,10 +10,14 @@
 #include "Dance.h"
 #include "IotGatewayCredentials.h"
 #include "Voice.h"
+#include "Muse.h"
+#include "MuseDisplay.h"
+#include "Shell.h"
+#include "VoiceAura.h"
+#include "VoiceTransition.h"
+#include "Fonts.h"
 #include "Config.h"
 #include "Ui.h"
-#include "Dashboard.h"
-#include "Pairing.h"
 #include "Power.h"
 #include "Touch.h"
 #include "ServoMotion.h"
@@ -32,16 +36,12 @@ bool tiltServoReady = false;
 uint8_t turnHome = cfg::servo::kTurnHomeAngle;
 uint8_t tiltHome = cfg::servo::kTiltHomeAngle;
 
-String deviceName;
-String hardwareId;
-
 bool runtimeStarted = false;
 bool setupReady = false;
 
-// What owns the screen. Sleeping and waking are Bunty's face; the dashboard is
-// everything else. Network work continues in every state.
-enum class DisplayState : uint8_t { Dashboard, Sleeping, Waking };
-DisplayState displayState = DisplayState::Dashboard;
+// Muse owns connectivity; Bunty owns the idle face, sleep, and conversation UI.
+enum class DisplayState : uint8_t { Idle, Sleeping, Waking };
+DisplayState displayState = DisplayState::Idle;
 uint32_t lastInteractionAt = 0;
 
 // Bunty's eyes greet the user for a moment after pairing completes.
@@ -57,29 +57,19 @@ Dance dance;
 
 // Bunty's face owns the screen for the whole conversation.
 bool voiceFaceShown = false;
+bool remoteDisplayShown = false;
 Voice::Phase shownPhase = Voice::Phase::Off;
 uint32_t lastFaceFrameAt = 0;
-uint8_t waveform[cfg::voice::kWaveformSamples] = {};
-size_t waveformHead = 0;
 float mouthLevel = 0.0f;
+uint32_t noticeUntil = 0;
+uint32_t pairRestartAt = 0;
+void showNotice(const char *text,uint32_t duration) {
+  ui::showError(text); noticeUntil=millis()+duration;
+}
 
 bool clockSyncRequested = false;
 uint32_t nextClockSyncAt = 0;
 bool publicDnsConfigured = false;
-
-// ------------------------------------------------------------- identity ---
-
-void loadIdentity() {
-  const uint64_t chipId = ESP.getEfuseMac();
-  char name[24];
-  snprintf(name, sizeof(name), "Bunty-%06llX",
-           static_cast<unsigned long long>(chipId & 0xFFFFFFULL));
-  deviceName = name;
-  char identifier[24];
-  snprintf(identifier, sizeof(identifier), "bunty-%012llx",
-           static_cast<unsigned long long>(chipId & 0xFFFFFFFFFFFFULL));
-  hardwareId = identifier;
-}
 
 // ---------------------------------------------------------- iot gateway ---
 
@@ -92,18 +82,6 @@ bool isIotGatewayToken(const char *token) {
     }
   }
   return true;
-}
-
-// Scopes the gateway's short-term conversation memory. Minted whenever a new
-// credential is stored, i.e. on every provisioned flash, and kept across
-// power cycles.
-void mintVoiceSession() {
-  char sessionId[17];
-  snprintf(sessionId, sizeof(sessionId), "%08x%08x",
-           static_cast<unsigned>(esp_random()),
-           static_cast<unsigned>(esp_random()));
-  preferences.putString(cfg::nvs::kIotSession, sessionId);
-  logPrintf("[iot-gateway] new conversation session %s\n", sessionId);
 }
 
 // A provisioned build carries a fresh token; copy it into NVS so ordinary
@@ -124,19 +102,13 @@ void syncIotGatewayCredential() {
       preferences.putString(cfg::nvs::kIotDevice, compiledDevice) > 0;
   Serial.println(saved ? "[iot-gateway] stored flashed credential"
                        : "[iot-gateway] could not store flashed credential");
-  if (saved) mintVoiceSession();
 }
 
 void startVoice() {
   char token[48] = {};
-  char session[17] = {};
   preferences.getString(cfg::nvs::kIotToken, token, sizeof(token));
-  preferences.getString(cfg::nvs::kIotSession, session, sizeof(session));
-  if (isIotGatewayToken(token) && session[0] == '\0') {
-    mintVoiceSession();
-    preferences.getString(cfg::nvs::kIotSession, session, sizeof(session));
-  }
-  voice.begin(&microphone, isIotGatewayToken(token) ? token : "", session);
+  if (!voice.begin(&microphone, isIotGatewayToken(token) ? token : ""))
+    Serial.println("[muse] voice initialization failed");
 }
 
 // TLS certificate validity depends on a real clock; NTP runs asynchronously.
@@ -169,27 +141,26 @@ void serviceClockSync() {
 
 // -------------------------------------------------------------- runtime ---
 
-void startRuntime(bool reconnectWifi) {
-  runtimeStarted = true;
-  displayState = DisplayState::Dashboard;
-  lastInteractionAt = millis();
-  dashboard::restart();
-  // Commissioning has ended (or this boot was already paired). Reclaim BLE
-  // before allocating voice tasks and I2S DMA; no audio is needed in setup.
-  pairing::releaseMemory();
-  if (!microphone.available() && microphone.begin()) startVoice();
+void showIdleFace() {
+  ui::Guard guard;
+  if(muse::displayActive()) return;
+  if(shell::resume()) {shell::invalidate();return;}
+  animations->setEmotion(Emotion::Neutral);
+  animations->setAttention(Face::Attention::Idle);
+  ui::display().clear(cfg::ui::kBackground);
+  animations->beginSpeaking(millis(), false);
+  ui::drawControls();
+  ui::display().present();
+}
 
-  if (reconnectWifi) {
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(preferences.getString(cfg::nvs::kWifiSsid, "").c_str(),
-               preferences.getString(cfg::nvs::kWifiPassword, "").c_str());
-  }
-  // On battery the radio sleeps between dashboard polls; power::service()
-  // owns that decision on both the cold-boot and the newly-paired path.
+void startRuntime() {
+  runtimeStarted = true;
+  displayState = DisplayState::Idle;
+  lastInteractionAt = millis();
+  if (!microphone.available() && microphone.begin()) startVoice();
   power::markBusy();
   lastWifiStatus = WiFi.status();
-  if (!greetingEyesShown) dashboard::render();
+  if (!greetingEyesShown) showIdleFace();
 }
 
 void enterSleep() {
@@ -200,7 +171,7 @@ void enterSleep() {
     animations->beginSleeping(millis());
   }
   ui::fadeBacklightTo(cfg::ui::kSleepBacklightDuty);
-  Serial.println("[display] sleeping; background sync remains active");
+  Serial.println("[display] sleeping; Muse connection remains active");
 }
 
 void wake() {
@@ -213,37 +184,22 @@ void wake() {
   Serial.println("[display] wake touch accepted");
 }
 
-void forgetPairing() {
-  ui::showUnpaired();
-  dashboard::notifyGaugeBeforeUnpair();
-  WiFi.disconnect(true, true);
-
-  // Keep local unpairing scoped to the Gauge relationship.
-  for (const char *key : cfg::nvs::kGaugeKeys) preferences.remove(key);
-  dashboard::clear();
-  Serial.println("[unpair] cleared local Gauge pairing, Wi-Fi, and cache");
-  delay(800);
-  ESP.restart();
-}
+void forgetPairing() { muse::resetPairing(); }
 
 enum class Overlay : uint8_t { kNone, kSettings, kConfirmUnpair, kConfirmDisconnect };
 Overlay overlay = Overlay::kNone;
 
 ui::SettingsStatus settingsStatus() {
-  static String network;
-  static String server;
-  network = preferences.getString(cfg::nvs::kWifiSsid, "");
-  server = preferences.getString(cfg::nvs::kServerId, "");
   ui::SettingsStatus status;
-  status.paired = preferences.getBool(cfg::nvs::kPaired, false);
-  status.online = WiFi.status() == WL_CONNECTED && dashboard::online();
-  status.network = network.c_str();
-  status.server = server.c_str();
-  status.signal = WiFi.RSSI();
+  status.paired = muse::paired();
+  status.online = muse::connected();
+  status.network = muse::network();
+  status.signal = status.online ? WiFi.RSSI() : 0;
   return status;
 }
 
 void openSettings() {
+  shell::hide();
   overlay = Overlay::kSettings;
   touch::flush();
   ui::showSettings(settingsStatus());
@@ -252,16 +208,11 @@ void openSettings() {
 void closeOverlay() {
   overlay = Overlay::kNone;
   touch::flush();
-  dashboard::render();
+  showIdleFace();
 }
 
-// Drops the link without forgetting anything, so the same Mac can be rejoined
-// by restarting.
-void disconnectFromGauge() {
-  WiFi.disconnect(false, false);
-  dashboard::forgetDiscovery();
-  ui::showError("Disconnected");
-  delay(1200);
+void disconnectFromMuse() {
+  muse::disconnect();
   closeOverlay();
 }
 
@@ -272,18 +223,17 @@ void serviceSettingsTouch(const touch::Event &event) {
       switch (ui::settingsRowAt(event.x, event.y)) {
         case ui::SettingsRow::kPair:
           ui::showError("Restarting to pair");
-          delay(900);
-          forgetPairing();
+          pairRestartAt=millis()+900;
           break;
         case ui::SettingsRow::kDisconnect:
           overlay = Overlay::kConfirmDisconnect;
           touch::flush();
-          ui::showConfirm("DISCONNECT?", "Stays paired with this Mac");
+          ui::showConfirm("DISCONNECT?", "Keeps saved credentials");
           break;
         case ui::SettingsRow::kUnpair:
           overlay = Overlay::kConfirmUnpair;
           touch::flush();
-          ui::showConfirm("UNPAIR?", "Bunty will forget this Mac");
+          ui::showConfirm("UNPAIR?", "Bunty will forget Muse setup");
           break;
         case ui::SettingsRow::kClose:
           closeOverlay();
@@ -298,7 +248,7 @@ void serviceSettingsTouch(const touch::Event &event) {
       else closeOverlay();
       return;
     case Overlay::kConfirmDisconnect:
-      if (ui::confirmAcceptedAt(event.x, event.y)) disconnectFromGauge();
+      if (ui::confirmAcceptedAt(event.x, event.y)) disconnectFromMuse();
       else if (ui::confirmRejectedAt(event.x, event.y)) openSettings();
       else closeOverlay();
       return;
@@ -314,7 +264,7 @@ bool serviceFace() {
     if (touch::poll().kind != touch::Event::Kind::kNone) {
       power::markBusy();
       wake();
-      // The waking touch must not also act on the dashboard when it returns.
+      // The waking touch must not also act on the idle face when it returns.
       touch::flush();
       return true;
     }
@@ -331,36 +281,21 @@ bool serviceFace() {
   }
   if (stillWaking) return true;
 
-  displayState = DisplayState::Dashboard;
+  displayState = DisplayState::Idle;
   lastInteractionAt = now;
-  dashboard::render();
+  showIdleFace();
   return false;
 }
 
 // ---------------------------------------------------------------- voice ---
 
-const char *phaseLabel(Voice::Phase phase) {
-  switch (phase) {
-    case Voice::Phase::Connecting: return "CONNECTING";
-    case Voice::Phase::Listening: return "LISTENING";
-    case Voice::Phase::Thinking:
-    case Voice::Phase::Finishing: return "THINKING";
-    case Voice::Phase::Speaking: return "";
-    case Voice::Phase::Off: break;
-  }
-  return "";
-}
-
 void showVoiceFace(uint32_t now) {
   voiceFaceShown = true;
   shownPhase = Voice::Phase::Off;
-  waveformHead = 0;
   mouthLevel = 0.0f;
-  memset(waveform, 0, sizeof(waveform));
   ui::Guard guard;
   ui::display().clear(cfg::ui::kBackground);
   animations->beginSpeaking(now, false);
-  ui::drawTopBar(false);
   ui::display().present();
 }
 
@@ -371,48 +306,28 @@ void hideVoiceFace() {
   lastInteractionAt = millis();
   const char *error = voice.lastError();
   if (*error) {
-    ui::showError(error);
-    delay(1500);
+    showNotice(error,1500);
+    return;
   }
-  if (displayState == DisplayState::Dashboard) dashboard::render();
+  if (displayState == DisplayState::Idle) showIdleFace();
 }
 
-// Eyes, a phase label, the microphone level while listening, and a mouth
-// that opens with the reply actually reaching the speaker.
+// Voice is expressed by the face and independently composed border aura.
+// Keep the same mouth through listening/thinking; output energy drives speech.
 void serviceVoiceFace(uint32_t now) {
-  const Voice::Phase phase = voice.phase();
-  animations->setEmotion(phase == Voice::Phase::Speaking ? voice.emotion()
-                                                         : Emotion::Neutral);
-  if (phase != shownPhase) {
-    const bool wasSpeaking = shownPhase == Voice::Phase::Speaking;
-    shownPhase = phase;
-    ui::Guard guard;
-    const char *label = phaseLabel(phase);
-    if (*label) animations->drawWakeIcon(label);
-    else animations->clearWakeIcon();
-    if (wasSpeaking) animations->drawSpeakingMouth(0);
-    if (phase != Voice::Phase::Listening) animations->clearInputWaveform();
-  }
-  {
-    ui::Guard guard;
-    animations->serviceSpeaking(now);
-  }
-  if (now - lastFaceFrameAt < cfg::voice::kFaceFrameMs) return;
-  lastFaceFrameAt = now;
-
-  if (phase == Voice::Phase::Listening) {
-    uint32_t scaled = voice.inputLevel() * 100u / cfg::voice::kWaveformFullScaleRms;
-    waveform[waveformHead] = static_cast<uint8_t>(scaled > 100 ? 100 : scaled);
-    waveformHead = (waveformHead + 1) % cfg::voice::kWaveformSamples;
-    ui::Guard guard;
-    animations->drawInputWaveform(waveform, cfg::voice::kWaveformSamples, waveformHead);
-  } else if (phase == Voice::Phase::Speaking) {
-    const float level = voice.outputLevel();
-    mouthLevel += (level - mouthLevel) * (level > mouthLevel ? 0.6f : 0.3f);
-    float openness = mouthLevel * 120.0f;
-    ui::Guard guard;
-    animations->drawSpeakingMouth(static_cast<uint8_t>(openness > 100.0f ? 100.0f : openness));
-  }
+  const auto phase=voice.phase();
+  const bool changed=phase!=shownPhase;
+  shownPhase=phase;
+  animations->setAttention(phase==Voice::Phase::Listening?Face::Attention::Listening:
+    phase==Voice::Phase::Speaking?Face::Attention::Speaking:Face::Attention::Thinking);
+  animations->setEmotion(phase==Voice::Phase::Speaking?voice.emotion():Emotion::Neutral);
+  {ui::Guard guard;animations->serviceSpeaking(now);}
+  if(!changed && now-lastFaceFrameAt<cfg::voice::kFaceFrameMs)return;
+  lastFaceFrameAt=now;
+  const float level=phase==Voice::Phase::Speaking?voice.outputLevel():0;
+  mouthLevel+=(level-mouthLevel)*(level>mouthLevel?.6f:.3f);
+  ui::Guard guard;
+  animations->drawSpeakingMouth(uint8_t(std::min(mouthLevel*120.f,100.f)));
 }
 
 // Returns true while the conversation owns the screen and touch.
@@ -424,33 +339,85 @@ bool serviceVoice() {
     return false;
   }
   lastInteractionAt = now;
-  if (displayState != DisplayState::Dashboard || overlay != Overlay::kNone) {
+  if (displayState != DisplayState::Idle || overlay != Overlay::kNone) {
     overlay = Overlay::kNone;
-    displayState = DisplayState::Dashboard;
+    displayState = DisplayState::Idle;
     ui::fadeBacklightTo(255);
   }
   if (!voiceFaceShown) showVoiceFace(now);
-  // Anywhere on the face is the mic button: end, or interrupt the reply.
-  if (touch::poll().kind == touch::Event::Kind::kTap) voice.toggle();
+  const auto event=touch::poll();
+  if(event.kind==touch::Event::Kind::kLongPress)voice.end();
+  else if(event.kind==touch::Event::Kind::kTap &&
+          (voice.phase()==Voice::Phase::Speaking || voice.phase()==Voice::Phase::Thinking))
+    voice.toggle(); // a touch interrupts; VAD sends speech automatically
   serviceVoiceFace(now);
   return true;
 }
 
 void serviceRuntime() {
+  serviceClockSync();
+  // One UI transaction per loop prevents asynchronous image/text commands
+  // from taking ownership between a main-task check and its drawing calls.
+  ui::Guard guard;
+  if(muse::displayActive()) {
+    noticeUntil=0;
+    remoteDisplayShown=true; voiceFaceShown=false;
+    overlay=Overlay::kNone; displayState=DisplayState::Idle;
+    ui::fadeBacklightTo(255);
+    dance.service(voice.phase(),voice.emotion(),millis());
+    if(muse::imageFetching() || voice.active()) power::markBusy();
+    lastInteractionAt=millis();
+    const auto event=touch::poll();
+    if(event.kind==touch::Event::Kind::kTap)muse::tapDisplay();
+    else if(event.kind==touch::Event::Kind::kLongPress) {
+      if(voice.active())voice.end();
+      else {muse::dismissDisplay();openSettings();}
+    }
+    return;
+  }
+  if(pairRestartAt) return;
+  if(noticeUntil) {
+    if(static_cast<int32_t>(millis()-noticeUntil)<0) return;
+    noticeUntil=0; showIdleFace();
+  }
+  if(remoteDisplayShown) { remoteDisplayShown=false; showIdleFace(); }
+  if(shell::takeFaceRequest()) showIdleFace();
   if (greetingEyesShown && static_cast<int32_t>(millis() - greetingEndsAt) < 0) return;
   if (greetingEyesShown) {
     greetingEyesShown = false;
-    displayState = DisplayState::Dashboard;
+    displayState = DisplayState::Idle;
     lastInteractionAt = millis();
-    dashboard::render();
+    showIdleFace();
   }
 
-  serviceClockSync();
+  if(shell::visible()) {
+    voiceFaceShown=false; displayState=DisplayState::Idle; overlay=Overlay::kNone;
+    dance.service(voice.phase(),voice.emotion(),millis());
+    const uint32_t now=millis();
+    auto event=touch::poll();
+    const bool dimmed=!voice.active() && now-shell::activityAt()>=cfg::ui::kIdleSleepMs;
+    if(event.kind!=touch::Event::Kind::kNone) {
+      power::markBusy();shell::wake(now);
+      if(dimmed) event={}; // the waking touch must not check a task
+    }
+    ui::fadeBacklightTo(dimmed && event.kind==touch::Event::Kind::kNone &&
+                        now-shell::activityAt()>=cfg::ui::kIdleSleepMs?cfg::ui::kSleepBacklightDuty:255);
+    const auto action=shell::service(event,muse::connected(),voice.phase()==Voice::Phase::Speaking,now);
+    if(action==shell::Action::Talk) {
+      if(voice.ready()) {shell::hide();if(!voice.active())voice.toggle();}
+      else showNotice("Muse is connecting",1200);
+    } else if(action==shell::Action::Face) {
+      shell::showFace();shell::takeFaceRequest();showIdleFace();
+    } else if(action==shell::Action::Settings) {
+      if(voice.active())voice.end();else openSettings();
+    }
+    if(voice.active()) power::markBusy();
+    return;
+  }
   const bool conversing = serviceVoice();
+  if(noticeUntil || shell::visible()) return;
 
-  if (conversing) {
-    // The dashboard keeps syncing behind the face; it just doesn't draw.
-  } else if (displayState == DisplayState::Dashboard) {
+  if (!conversing && displayState == DisplayState::Idle) {
     const touch::Event event = touch::poll();
     if (event.kind != touch::Event::Kind::kNone) {
       lastInteractionAt = millis();
@@ -460,51 +427,35 @@ void serviceRuntime() {
       serviceSettingsTouch(event);
       return;
     }
-    if (event.kind == touch::Event::Kind::kTap && ui::voiceControlAt(event.x, event.y)) {
-      if (voice.ready()) {
-        voice.toggle();
-      } else {
-        ui::showError("Voice not set up");
-        delay(1200);
-        dashboard::render();
-      }
+    if(event.kind==touch::Event::Kind::kTap && ui::settingsControlAt(event.x,event.y)) {
+      shell::showHome();return;
+    }
+    if(event.kind==touch::Event::Kind::kTap) {
+      if(voice.ready())voice.toggle();
+      else showNotice("Muse is connecting",1200);
       return;
     }
-    if (event.kind == touch::Event::Kind::kLongPress ||
-        (event.kind == touch::Event::Kind::kTap &&
-         ui::settingsControlAt(event.x, event.y))) {
-      openSettings();
-      return;
-    }
+    if(event.kind==touch::Event::Kind::kLongPress) {openSettings();return;}
   } else if (serviceFace()) {
     return;
   }
 
-  if (!conversing && displayState == DisplayState::Dashboard && overlay == Overlay::kNone &&
-      millis() - lastInteractionAt >= cfg::dashboard::kIdleSleepMs) {
+  if (!conversing && displayState == DisplayState::Idle && overlay == Overlay::kNone &&
+      millis() - lastInteractionAt >= cfg::ui::kIdleSleepMs) {
     enterSleep();
   }
 
   const wl_status_t wifiStatus = WiFi.status();
   if (wifiStatus != lastWifiStatus) {
     lastWifiStatus = wifiStatus;
-    dashboard::forgetDiscovery();
-    dashboard::refreshSoon();
-    if (displayState == DisplayState::Dashboard && !conversing) {
-      dashboard::render();
-    } else {
-      ui::Guard guard;
-      ui::drawTopBar(true);
+    if (displayState == DisplayState::Idle && !conversing) {
+      showIdleFace();
     }
   }
 
-  if (dashboard::serviceFetch() && displayState == DisplayState::Dashboard && !conversing) {
-    dashboard::render();
-  }
-
-  if (displayState == DisplayState::Dashboard && !conversing && dashboard::pageDue()) {
-    dashboard::nextPage();
-    dashboard::render();
+  if (!conversing && displayState == DisplayState::Idle && overlay == Overlay::kNone) {
+    ui::Guard guard;
+    animations->serviceSpeaking(millis());
   }
 }
 
@@ -541,11 +492,11 @@ void runFaceDemo() {
       ui::display().clear(cfg::ui::kBackground);
       animations->setEmotion(static_cast<Emotion>(index));
       animations->beginSpeaking(start, false);
-      ui::drawTopBar(false);
-      ui::display().present();
+          ui::display().present();
       animations->drawWakeIcon(kNames[index]);
     }
     while (millis() - start < 5000) {
+      ui::serviceBacklight();
       const uint32_t now = millis();
       // A stand-in speech envelope, so the mouth moves as it would in a reply.
       const float wave = fabsf(sinf(now * 0.012f)) * (0.5f + 0.5f * sinf(now * 0.003f));
@@ -623,6 +574,7 @@ void setup() {
 
   if (!ui::begin()) return;
   setupReady = true;
+  if(!shell::begin()) Serial.println("[ui] shell storage unavailable; using face controls");
   static BuntyAnimations sharedAnimations(ui::display());
   animations = &sharedAnimations;
   logPrintf("[display] free heap %u bytes, psram %u bytes\n",
@@ -636,17 +588,26 @@ void setup() {
   pinMode(cfg::pin::kAmpShutdown, OUTPUT);
   digitalWrite(cfg::pin::kAmpShutdown, LOW);
 
-  preferences.begin(cfg::nvs::kNamespace, false);
+  if (!preferences.begin(cfg::nvs::kNamespace, false)) {
+    setupReady = false;
+    ui::showError("Local storage unavailable");
+    ui::fadeBacklight(true);
+    return;
+  }
   power::begin(preferences);
-  loadIdentity();
   syncIotGatewayCredential();
-  dashboard::begin(preferences, hardwareId);
 
   const bool touchReady = touch::begin();
-  pairing::begin(preferences, deviceName, hardwareId);
+  const bool museStarted = muse::begin();
 
-  if (preferences.getBool(cfg::nvs::kPaired, false)) {
-    startRuntime(true);
+  if (!museStarted) {
+    setupReady = false;
+    ui::showError("Muse initialization failed");
+    ui::fadeBacklight(true);
+    return;
+  }
+  if (muse::paired()) {
+    startRuntime();
     ui::fadeBacklight(true);
     if (!touchReady) logPrintf("[touch] unavailable; local controls disabled\n");
     return;
@@ -658,29 +619,62 @@ void setup() {
     ui::showError("Touch controller missing");
     return;
   }
-  if (!pairing::start()) ui::showError(pairing::error());
+}
+
+void serviceVoiceAura() {
+  if(!runtimeStarted)return;
+  static uint32_t last=0;
+  static Voice::Phase previous=Voice::Phase::Off;
+  const auto phase=voice.phase();const uint32_t now=millis();
+  if(phase==previous && now-last<100)return;
+  static voiceAura::Frame source{},current{};
+  static uint32_t changedAt=0;
+  if(phase!=previous){source=current;changedAt=now;}
+  previous=phase;last=now;
+  voiceAura::State state=voiceAura::State::Off;
+  switch(phase) {
+    case Voice::Phase::Listening:state=voiceAura::State::Listening;break;
+    case Voice::Phase::Thinking:state=voiceAura::State::Thinking;break;
+    case Voice::Phase::Speaking:state=voiceAura::State::Speaking;break;
+    case Voice::Phase::Connecting:state=voiceAura::State::Connecting;break;
+    case Voice::Phase::Finishing:state=voiceAura::State::Finishing;break;
+    case Voice::Phase::Off:break;
+  }
+  const unsigned level=phase==Voice::Phase::Speaking?unsigned(voice.outputLevel()*100):
+    unsigned(uint64_t(voice.inputLevel())*100/cfg::voice::kInputFullScaleRms);
+  const auto target=voiceAura::frame(state,now,level);
+  const auto aura=voiceAura::blend(source,target,voiceScreen::transition(now,changedAt));
+  current=aura;
+  ui::Guard guard;ui::display().setAura(aura.color,aura.opacity);
 }
 
 void loop() {
+  const int64_t loopStarted=esp_timer_get_time();
+  ui::serviceBacklight();
+  if(pairRestartAt && static_cast<int32_t>(millis()-pairRestartAt)>=0) {
+    pairRestartAt=0; forgetPairing();
+  }
   if (!setupReady) { delay(100); return; }
   power::service();
+  serviceVoiceAura();
+  muse::serviceDisplay();
+  muse::service(turnServoReady ? &turnServo : nullptr, tiltServoReady ? &tiltServo : nullptr, turnHome, tiltHome, voice.phase()!=Voice::Phase::Off || dance.active() || speechGesture::visualWaiting());
 
   // Servo trajectories are serviced independently by their core-1 workers.
   const uint32_t now = millis();
 
-  if (pairing::active()) {
-    if (pairing::service()) {
-      // Commissioned: greet the user, then bring the dashboard up behind it.
+  if (muse::setupActive()) {
+    if (muse::serviceSetup()) {
+      // Commissioned: greet the user, then bring the idle face up behind it.
       {
         ui::Guard guard;
         ui::display().fillScreen(cfg::ui::kBackground);
-        ui::drawTopBar(false);
-        animations->beginSpeaking(millis(), false);
+              animations->beginSpeaking(millis(), false);
         ui::display().present();
       }
       greetingEyesShown = true;
       greetingEndsAt = millis() + kGreetingMs;
-      startRuntime(false);
+      startRuntime();
     }
   } else if (runtimeStarted) {
     serviceRuntime();
@@ -688,7 +682,7 @@ void loop() {
 
   if (greetingEyesShown && static_cast<int32_t>(now - greetingEndsAt) < 0) {
     ui::Guard guard;
-    animations->serviceSpeaking(now);
+    if(!muse::displayActive()) animations->serviceSpeaking(now);
   }
 
   // Heap and task-stack headroom: once shortly after boot, then every 5 min.
@@ -698,12 +692,35 @@ void loop() {
     nextMemoryReportAt = now + 5 * 60 * 1000;
     memory::report();
   }
+  memory::recordLoop(uint32_t(esp_timer_get_time()-loopStarted));
   delay(8);
 }
 
-// Native ESP-IDF entry point; retain the existing application state machine.
+// Report the previous reset before display/radio startup, including brownouts,
+// panics and watchdogs. USB resets caused by opening a monitor are distinct.
+const char *resetReasonName(esp_reset_reason_t reason) {
+  switch(reason) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT: return "task-watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "sdio";
+    case ESP_RST_USB: return "usb";
+    default: return "other";
+  }
+}
 extern "C" void app_main() {
-  platformInit();
+  const auto reason=esp_reset_reason();
+  logPrintf("[boot] previous reset=%s (%d)\n",resetReasonName(reason),int(reason));
+  if (!platformInit()) {
+    // Preserve NVS and stop the reboot loop on an initialization failure.
+    for (;;) delay(1000);
+  }
   setup();
   for (;;) loop();
 }

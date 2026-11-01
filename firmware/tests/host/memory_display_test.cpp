@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include "Memory.h"
+#include "VoiceAura.h"
 #include "InternalAllocation.h"
 #include "flow32/graphics/Display.h"
 
@@ -50,18 +51,20 @@ void heap_caps_free(void *p) {
 struct Panel : DisplayTransport {
   std::vector<uint16_t> screen = std::vector<uint16_t>(240 * 320);
   size_t pixels = 0, calls = 0;
-  bool started = false;
+  bool started = false, failTransfer = false;
   bool begin(const DisplayPanel &) override { started = true; return true; }
   void end() override { started = false; }
-  void present(const uint16_t *data, int16_t x, int16_t y, int16_t w, int16_t h, int16_t stride) override {
+  bool present(const uint16_t *data, int16_t x, int16_t y, int16_t w, int16_t h, int16_t stride) override {
+    if (failTransfer) return false;
     assert(started && x >= 0 && y >= 0 && x + w <= 240 && y + h <= 320);
     const auto allocation = allocations.at(const_cast<uint16_t *>(data));
     assert((allocation.caps & (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)) == (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-    assert(allocation.bytes == 480 && h == 1 && stride == w);
+    assert(allocation.bytes == 3840 && w*h <= 1920 && stride == w);
     for (int row = 0; row < h; ++row)
       for (int col = 0; col < w; ++col) screen[(y + row) * 240 + x + col] = data[row * stride + col];
     pixels += w * h;
     ++calls;
+    return true;
   }
 };
 
@@ -79,11 +82,15 @@ void testDisplay(bool external) {
       if (entry.second.caps & MALLOC_CAP_INTERNAL) internal += entry.second.bytes;
       if (entry.second.caps & MALLOC_CAP_SPIRAM) color += entry.second.bytes;
     }
-    assert(internal == 10080);
+    assert(internal == (external ? 3840 : 13440));
     assert(color == (external ? 153600 : 0));
     const size_t before = allocationCalls;
+    transport.failTransfer = true;
     display.present();
-    assert(transport.pixels == 76800 && transport.calls == 320);
+    assert(transport.pixels == 0);
+    transport.failTransfer = false;
+    display.present();
+    assert(transport.pixels == 76800 && transport.calls == 40);
     display.present();
     assert(transport.pixels == 76800);
     display.drawPixel(20, 20, 0xffff);
@@ -96,6 +103,12 @@ void testDisplay(bool external) {
     display.drawPixel(20, 20, 0xffff);
     display.present();
     assert(transport.pixels == unchanged);
+    if(external) {
+      const uint16_t white=0xffff;
+      display.writeRow(20,20,&white,1);
+      display.present();
+      assert(transport.pixels == unchanged);
+    }
     display.fillRect(-4, -4, 8, 8, 0xffff);
     display.present(-4, -4, 8, 8);
     assert(transport.screen[0] == 0xffff);
@@ -110,6 +123,32 @@ void testDisplay(bool external) {
       display.fillRoundRect(i, 40, 30, 30, 8, 0xffff);
       display.present();
     }
+    // Aura composes only at transfer time; existing images remain intact.
+    display.clear(0);
+    display.drawPixel(120,160,0xffff);
+    display.present();
+    const auto original=transport.screen;
+    const size_t edgePixels=transport.pixels,edgeCalls=transport.calls;
+    display.setAura(0x07e0,10);
+    assert(transport.pixels==edgePixels+3324 && transport.calls==edgeCalls+4);
+    assert(transport.screen[0]!=original[0]);
+    assert(transport.screen[120*240+3]==original[120*240+3]);
+    assert(transport.screen[160*240+120]==0xffff);
+    display.setAura(0x07e0,10);
+    assert(transport.calls==edgeCalls+4); // unchanged aura performs no transfer
+    display.setAura(0,0);
+    assert(transport.screen==original);
+    transport.failTransfer=true;
+    display.setAura(0x001f,15);
+    transport.failTransfer=false;
+    display.setAura(0x001f,15); // same state retries a failed transfer
+    assert(transport.screen[0]==0x001f);
+    display.clear(0xffff);
+    display.present(); // content updates retain the listening indicator
+    assert(transport.screen[0]==0x001f);
+    assert(transport.screen[160*240+120]==0xffff);
+    display.setAura(0,0);
+    for(const auto pixel:transport.screen)assert(pixel==0xffff);
     assert(allocationCalls == before);
   }
   assert(allocations.empty() && !transport.started);
@@ -117,7 +156,7 @@ void testDisplay(bool external) {
 
 void testFailures() {
   psram = true;
-  for (int fail = 0; fail < 3; ++fail) {
+  for (int fail = 0; fail < 2; ++fail) {
     failAfter = fail;
     Panel transport;
     DisplayPanel spec;
@@ -154,7 +193,7 @@ void testArena() {
     assert(doc["turn"].as<int>() == 12);
     assert(arena.used() < sizeof(storage));
   }
-  // Exercise the exact two-arena snapshot swap used by Dashboard.
+  // Exercise bounded JSON arena reuse and swapping.
   alignas(8) uint8_t other[65536];
   memory::Arena arenas[2];
   arenas[0].bind(storage, sizeof(storage));
@@ -212,5 +251,17 @@ int main() {
   testFailures();
   std::cerr << "Testing JSON arenas\n";
   testArena();
+  for(uint32_t t: {0u,800u,1600u,60000u,UINT32_MAX}) {
+    assert(voiceAura::frame(voiceAura::State::Off,t,100).opacity==0);
+    for(auto state: {voiceAura::State::Listening,voiceAura::State::Thinking,
+                    voiceAura::State::Speaking,voiceAura::State::Connecting,
+                    voiceAura::State::Finishing}) {
+      for(unsigned level: {0u,100u,UINT32_MAX}) {
+        const auto aura=voiceAura::frame(state,t,level);
+        assert(aura.color && aura.opacity>=5 && aura.opacity<=11);
+      }
+    }
+  }
+  assert(voiceAura::frame(voiceAura::State::Listening,60000).opacity>0);
   std::cout << "PASS: task-scoped internal allocation, display placement, dirty regions, clipping, monochrome fallback, allocation failures, no drawing allocations, bounded JSON and snapshot reuse\n";
 }

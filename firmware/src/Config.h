@@ -54,8 +54,7 @@ constexpr int kMicrophonePort = I2S_NUM_1;
 namespace ui {
 constexpr int16_t kScreenWidth = 240;
 constexpr int16_t kScreenHeight = 320;
-// Everything below the persistent status bar belongs to the dashboard or to
-// Bunty's face.
+// Everything below the persistent status bar belongs to Bunty's face.
 constexpr int16_t kStatusBarHeight = 32;
 constexpr uint32_t kSpiHz = 40000000;
 constexpr uint8_t kBacklightChannel = 0;
@@ -65,14 +64,16 @@ constexpr uint32_t kBacklightPwmHz = 12000;
 constexpr uint8_t kSleepBacklightDuty = 8;
 // Temporary bench check: at boot, show each emotion's face for 5 s, forever.
 constexpr bool kFaceDemo = false;
+constexpr uint32_t kPairingActivityFrameMs = 420;
+constexpr uint32_t kIdleSleepMs = 120000;
 
 constexpr uint16_t kBackground = rgb565(6, 8, 15);
-constexpr uint16_t kSurface = rgb565(17, 21, 33);
-constexpr uint16_t kBorder = rgb565(38, 44, 62);
-constexpr uint16_t kText = rgb565(246, 248, 252);
-constexpr uint16_t kMuted = rgb565(142, 151, 172);
-constexpr uint16_t kAccent = rgb565(111, 97, 255);
-constexpr uint16_t kSuccess = rgb565(88, 226, 173);
+constexpr uint16_t kSurface = rgb565(17, 24, 23);
+constexpr uint16_t kBorder = rgb565(38, 48, 44);
+constexpr uint16_t kText = rgb565(233, 241, 223);
+constexpr uint16_t kMuted = rgb565(129, 149, 132);
+constexpr uint16_t kAccent = rgb565(193, 225, 156);
+constexpr uint16_t kSuccess = rgb565(193, 225, 156);
 constexpr uint16_t kDanger = rgb565(255, 102, 118);
 }  // namespace ui
 
@@ -104,7 +105,6 @@ constexpr float kSweepDegreesPerSecond = 30.0f;
 // ----------------------------------------------------------------- touch ---
 
 namespace touch {
-constexpr uint32_t kPairingDecisionTimeoutMs = 30000;
 // Hynitron CST816-family controller on the shared touch/IMU I2C bus.
 constexpr uint8_t kAddress = 0x15;
 constexpr uint32_t kBusHz = 400000;
@@ -144,7 +144,6 @@ constexpr uint16_t kAudioMilliamps = 300;     // MAX98357 into 4 ohm at speech v
 // Both servos while dancing to speech: small arcs at a capped glide rate, so
 // neither ever approaches the stall current kServoMilliamps budgets for.
 constexpr uint16_t kDanceMilliamps = 440;
-constexpr uint16_t kBatteryMilliampHours = 1500;
 
 // The policy falls out of this arithmetic rather than out of special cases:
 // exactly one full-travel servo runs at a time, and the dance fits beside audio.
@@ -173,72 +172,7 @@ constexpr uint32_t kConservativeMs = 10 * 60 * 1000;
 constexpr uint8_t kConservativeBacklight = 160;
 constexpr float kConservativeServoDegreesPerSecond = 20.0f;
 
-constexpr uint8_t kSaverBacklight = 60;
-// Disabled by default: the gauge has no feedback and drifts.
-constexpr uint8_t kSaverPercent = 0;
-constexpr uint32_t kFuelPersistMs = 60000;
 }  // namespace power
-
-// --------------------------------------------------------------- pairing ---
-
-namespace pairing {
-constexpr char kAccessoryProtocol[] = "dev.gauge.accessory";
-constexpr char kPairingProtocol[] = "dev.gauge.pairing";
-constexpr char kCommissionProtocol[] = "dev.gauge.commission";
-constexpr uint16_t kProtocolVersion = 1;
-constexpr char kFirmwareVersion[] = "0.1.0";
-
-constexpr char kServiceUuid[] = "c9cce6f3-bf10-4e6d-b719-f32911bbba89";
-constexpr char kIdentityCharacteristicUuid[] =
-    "1db9634c-a20f-43c6-8ed9-69ceda338178";
-constexpr char kConfigCharacteristicUuid[] =
-    "289be295-d110-411b-888c-c80a601177fa";
-constexpr char kStatusCharacteristicUuid[] =
-    "e763eccb-fa4c-4e3a-9211-850513371105";
-
-// Commissioning arrives as magic-tagged, sequenced GATT writes.
-constexpr uint8_t kFrameMagic = 0x47;
-constexpr size_t kFrameHeaderSize = 3;
-constexpr size_t kMaximumConfigBytes = 4335;
-constexpr uint16_t kMtu = 185;
-
-constexpr uint32_t kWifiJoinTimeoutMs = 30000;
-// Bluedroid owns a large share of internal heap. Hold the "connected" screen
-// briefly, then release it for Wi-Fi and the dashboard.
-constexpr uint32_t kShutdownDelayMs = 2500;
-constexpr uint32_t kActivityFrameMs = 420;
-}  // namespace pairing
-
-// ------------------------------------------------------------- dashboard ---
-
-namespace dashboard {
-constexpr char kProtocol[] = "dev.gauge.dashboard";
-constexpr char kServiceType[] = "_gauge._tcp.local.";
-constexpr char kDefaultPath[] = "/v1/dashboard";
-constexpr size_t kMaximumBytes = 12288;
-
-constexpr uint32_t kPageTimeMs = 11000;
-constexpr uint32_t kDefaultRefreshMs = 120000;
-constexpr uint32_t kMinimumRefreshSeconds = 30;
-constexpr uint32_t kMaximumRefreshSeconds = 900;
-constexpr uint32_t kRetryMs = 15000;
-// ESP32 modem sleep can leave a long-lived LAN accessory with a stale ARP or
-// station route even though WiFi.status() still reports connected. Force one
-// clean station reconnect after this many consecutive TCP failures.
-constexpr uint8_t kReconnectAfterFailures = 3;
-constexpr uint32_t kIdleSleepMs = 120000;
-
-constexpr uint32_t kConnectTimeoutMs = 4000;
-constexpr uint32_t kReadTimeoutMs = 5000;
-constexpr uint32_t kUnpairNotifyConnectMs = 2000;
-constexpr uint32_t kUnpairNotifyReadMs = 2500;
-
-// Rows that fit on each page at the current font sizes.
-constexpr size_t kProviderRowsPerPage = 4;
-constexpr size_t kLimitRowsPerPage = 6;
-constexpr size_t kEventRowsPerPage = 5;
-constexpr size_t kTodoRowsPerPage = 6;
-}  // namespace dashboard
 
 // ----------------------------------------------------------------- audio ---
 
@@ -252,18 +186,13 @@ constexpr int kMicShift = 13;
 // A slot is treated as unwired once its energy falls below 1/8 of the other's;
 // otherwise the two mics are averaged, which lowers uncorrelated noise.
 constexpr uint32_t kMicSlotRatio = 8;
-constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow TLS + Flux setup
+constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow Muse uplink setup
 
 constexpr uint8_t kVolumePercent = 95;
 constexpr int kSpeakerDmaBuffers = 4;
 constexpr int kSpeakerDmaFrames = 240;
 constexpr uint32_t kSpeakerDrainMs =
     kSpeakerDmaBuffers * kSpeakerDmaFrames * 1000 / kSampleRate + 30;
-// Aura streams faster than real time; when this fills, the socket simply
-// stops reading and TCP holds the rest at the gateway. ~12 s of reply.
-constexpr size_t kPlaybackRingBytes = 384 * 1024;
-// Jitter cushion before the first sample, and again after any underrun.
-constexpr size_t kPrebufferBytes = kSampleRate * 2 * 120 / 1000;
 // Output RMS that reads as "fully open" for the mouth and the dance.
 constexpr float kLevelFullScale = 5000.0f;
 }  // namespace audio
@@ -275,33 +204,8 @@ namespace voice {
 #define IOT_GATEWAY_HOST "bunty.underdogthinkers.com"
 #endif
 constexpr char kGatewayHost[] = IOT_GATEWAY_HOST;
-constexpr char kLivePath[] = "/v1/live";
-
-// Flux's recommended chunk: 80 ms of 16 kHz linear16.
-constexpr size_t kUploadFrameBytes = 2560;
-
-// Conversation mode ends after this long without anyone talking. Gateway
-// speech events are authoritative; local energy only bridges the few hundred
-// ms Flux needs to report a word that starts right at the deadline.
-constexpr uint32_t kSilenceExitMs = 8000;
-constexpr uint32_t kLocalSpeechGraceMs = 3000;
-constexpr uint32_t kLocalSpeechHoldMs = 600;
-
-constexpr uint32_t kConnectTimeoutMs = 20000;
-constexpr uint32_t kReplyTimeoutMs = 30000;
-constexpr uint32_t kCompleteTimeoutMs = 5000;
-// IDF drops the connection when a write times out, so give a slow uplink room.
-constexpr uint32_t kSendTimeoutMs = 5000;
-constexpr uint8_t kMaxConsecutiveFailures = 3;
-constexpr uint32_t kRetryDelayMs = 800;
-
-constexpr int kSocketBufferBytes = 4096;
-constexpr int kSocketTaskStack = 6144;
-constexpr size_t kControlBytes = 8192;
-
 constexpr uint32_t kFaceFrameMs = 45;
-constexpr size_t kWaveformSamples = 58;
-constexpr uint32_t kWaveformFullScaleRms = 1500;
+constexpr uint32_t kInputFullScaleRms = 1500;
 }  // namespace voice
 
 // ----------------------------------------------------------------- dance ---
@@ -341,7 +245,6 @@ constexpr uint32_t kTickMs = 20;
 // --------------------------------------------------------------- network ---
 
 namespace net {
-constexpr uint32_t kMdnsQueryTimeoutMs = 3000;
 // TLS certificate validity depends on a real clock.
 constexpr time_t kMinimumTrustedUnixTime = 1704067200;  // 2024-01-01 UTC
 constexpr uint32_t kClockSyncRetryMs = 30000;
@@ -349,38 +252,15 @@ constexpr uint32_t kClockSyncRetryMs = 30000;
 
 // ------------------------------------------------------- persisted state ---
 
-// NVS namespace and keys. Unpairing clears kGaugeKeys only; the IoT gateway
-// credential and the Bluetooth address are provisioned once and survive
-// re-pairing, so this accessory keeps one identity for its whole life.
+// Local power state and the gateway TTS credential. Muse owns its homehub NVS.
 namespace nvs {
 constexpr char kNamespace[] = "bunty";
 
-constexpr char kApiVersion[] = "api";
-constexpr char kDeviceId[] = "device_id";
-constexpr char kServerId[] = "server_id";
-constexpr char kToken[] = "token";
-constexpr char kServiceType[] = "service";
-constexpr char kPath[] = "path";
-constexpr char kPort[] = "port";
-constexpr char kServerIp[] = "server_ip";
-constexpr char kWifiSsid[] = "wifi_ssid";
-constexpr char kWifiPassword[] = "wifi_pass";
-constexpr char kDashboard[] = "dashboard";
-constexpr char kPaired[] = "paired";
-constexpr char kBleAddress[] = "ble_addr";
-
 constexpr char kBrownouts[] = "brownouts";
-constexpr char kFuelUsed[] = "fuel_mas";
 
 constexpr char kIotToken[] = "iot_token";
 constexpr char kIotDevice[] = "iot_device";
-constexpr char kIotSession[] = "iot_session";
 
-constexpr const char *kGaugeKeys[] = {
-    kApiVersion, kDeviceId, kServerId,     kToken,     kServiceType,
-    kPath,       kPort, kServerIp,     kWifiSsid,     kWifiPassword, kDashboard,
-    kPaired,
-};
 }  // namespace nvs
 
 }  // namespace cfg

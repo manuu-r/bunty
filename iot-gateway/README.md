@@ -417,3 +417,14 @@ room costs nothing; audio recorded while the socket opens is still sent.
 - [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
 - [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
 - [Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
+
+## Muse reply TTS
+
+Muse firmware uses `POST /v1/tts` with the normal device bearer token and JSON
+`{"text":"Reply text from Muse"}`. This endpoint calls only the configured Aura
+TTS model, never Flux or Claude. Device authentication, rate limiting, request
+body limits and `MAX_TTS_CHARS` apply. Audio streams as raw mono 16 kHz
+little-endian PCM with `Content-Type: audio/l16;rate=16000;channels=1` and
+`X-Audio-Byte-Order: little-endian` (the gateway's PCM convention, not RFC
+network-endian L16). The existing browser and live conversation endpoints are
+unchanged.

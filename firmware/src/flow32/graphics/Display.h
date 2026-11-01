@@ -27,12 +27,15 @@ public:
 
   bool begin();
   void end();
-  bool ready() const { return mono_ && line_ && transportBegun_; }
+  bool ready() const { return (fb_ || mono_) && line_ && transportBegun_; }
   void reportMemory() const;
 
   const DisplayPanel &panel() const { return panel_; }
   void setBacklight(bool on);
 
+  // Transfer-only border overlay. Base framebuffer pixels remain unchanged;
+  // zero opacity restores the original edges. Caller holds the UI mutex.
+  void setAura(uint16_t color,uint8_t opacity);
   void present();
   void present(int16_t x, int16_t y, int16_t w, int16_t h);
 
@@ -64,6 +67,8 @@ public:
 
 private:
   size_t bufferBytes() const;
+  bool transferRegion(int16_t x,int16_t y,int16_t w,int16_t h);
+  uint16_t auraPixel(int16_t x,int16_t y,uint16_t base) const;
   void blendPixel(int16_t x, int16_t y, uint16_t fg, uint8_t cover4);
   uint16_t pixel(int16_t x, int16_t y) const;
   void markDirty(int16_t x, int16_t y);
@@ -73,9 +78,13 @@ private:
   bool transportBegun_ = false;
   uint16_t *fb_ = nullptr;
   uint8_t *mono_ = nullptr;
+  static constexpr int kTransferRows = 8;
   uint16_t *line_ = nullptr;
   // 16x16 tiles for the fixed 240x320 panel; no allocations while drawing.
   uint8_t dirty_[300] = {};
+  uint16_t auraColor_=0;
+  uint8_t auraOpacity_=0;
+  bool auraPending_=false;
   uint32_t transferredPixels_ = 0;
   uint32_t transfers_ = 0;
 };

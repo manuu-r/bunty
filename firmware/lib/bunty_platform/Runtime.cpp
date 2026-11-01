@@ -53,12 +53,18 @@ void configTime(long,long,const char *a,const char *b,const char *c) {
   esp_sntp_setservername(1,const_cast<char *>(b));
   esp_sntp_setservername(2,const_cast<char *>(c)); esp_sntp_init();
 }
-void platformInit() {
-  // Never erase NVS on an initialization error: it contains the user's pairing.
-  ESP_ERROR_CHECK(nvs_flash_init());
-  ESP_ERROR_CHECK(esp_netif_init());
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
+bool platformInit() {
   setvbuf(stdout,nullptr,_IONBF,0);
+  // Never erase identities/credentials automatically. An error must leave a
+  // readable diagnostic rather than ESP_ERROR_CHECK rebooting indefinitely.
+  esp_err_t err=nvs_flash_init();
+  if(err==ESP_OK) err=esp_netif_init();
+  if(err==ESP_OK) err=esp_event_loop_create_default();
+  if(err!=ESP_OK) {
+    printf("[boot] platform initialization failed: %s; stopped without erasing NVS\n",esp_err_to_name(err));
+    return false;
+  }
+  return true;
 }
 
 bool setCpuFrequencyMhz(uint32_t mhz) {

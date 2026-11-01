@@ -1,6 +1,7 @@
 #include "Log.h"
 #include "Touch.h"
 #include "TouchPress.h"
+#include "Memory.h"
 
 #include <driver/i2c_master.h>
 #include <freertos/FreeRTOS.h>
@@ -107,6 +108,7 @@ void readerTask(void *) {
                 event.x, event.y);
       xQueueSend(events_, &event, 0);
     }
+    memory::sampleTask("touch");
     vTaskDelayUntil(&tick, pdMS_TO_TICKS(kSampleMs));
   }
 }
@@ -114,6 +116,7 @@ void readerTask(void *) {
 }  // namespace
 
 bool begin() {
+  if(present_) return true;
   if (cfg::pin::kTouchSda < 0) return false;
   i2c_master_bus_config_t config = {};
   config.i2c_port = I2C_NUM_0;
@@ -140,7 +143,9 @@ bool begin() {
   device.dev_addr_length = I2C_ADDR_BIT_LEN_7;
   device.device_address = kAddress;
   device.scl_speed_hz = kBusHz;
-  if (i2c_master_bus_add_device(bus_, &device, &device_) != ESP_OK) return false;
+  if (i2c_master_bus_add_device(bus_, &device, &device_) != ESP_OK) {
+    i2c_del_master_bus(bus_); bus_=nullptr; present_=false; return false;
+  }
 
   configure();
   uint8_t identity[3] = {};
@@ -153,6 +158,9 @@ bool begin() {
                                           nullptr, 1) != pdPASS) {
     Serial.println("[touch] could not start the reader task");
     present_ = false;
+    if(events_) { vQueueDelete(events_); events_=nullptr; }
+    i2c_master_bus_rm_device(device_); device_=nullptr;
+    i2c_del_master_bus(bus_); bus_=nullptr;
   }
   return present_;
 }

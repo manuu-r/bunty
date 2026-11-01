@@ -1,14 +1,20 @@
 #include "Log.h"
 #include "Memory.h"
 #include "Ui.h"
-#include "Dashboard.h"
 #include "flow32/graphics/Display.h"
 
 namespace memory {
 namespace {
 struct TaskSample { const char *name = nullptr; uint32_t minimum = UINT32_MAX; int core = -1; uint32_t sampled = 0; };
 TaskSample tasks[12];
+std::atomic<uint32_t> loopPeakUs{0}, loopSlowCount{0};
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+}
+void recordLoop(uint32_t microseconds) {
+  // One writer: main task. Reports may exchange counters from another task.
+  uint32_t peak=loopPeakUs.load();
+  while(microseconds>peak && !loopPeakUs.compare_exchange_weak(peak,microseconds)) {}
+  if(microseconds>50000) ++loopSlowCount;
 }
 void sampleTask(const char *name) {
   const uint32_t now = millis();
@@ -34,6 +40,8 @@ void sampleTask(const char *name) {
   portEXIT_CRITICAL(&mux);
 }
 void report() {
+  logPrintf("[runtime] loop_peak_us=%u loops_over_50ms=%u\n",
+            unsigned(loopPeakUs.exchange(0)),unsigned(loopSlowCount.exchange(0)));
   for (uint32_t caps : {kInternal, kExternal, uint32_t(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)}) {
     multi_heap_info_t info = {};
     heap_caps_get_info(&info, caps);
@@ -50,7 +58,6 @@ void report() {
   portEXIT_CRITICAL(&mux);
   for (const auto &task : copy) if (task.name)
     logPrintf("[memory] task=%s core=%d stack_min_free=%u bytes\n", task.name, task.core, unsigned(task.minimum));
-  dashboard::reportMemory();
   ui::Guard guard;
   ui::display().reportMemory();
 }

@@ -3,6 +3,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_err.h>
 #include "Runtime.h"
+#include "Log.h"
 
 bool St77xxTransport::completed(esp_lcd_panel_io_handle_t,esp_lcd_panel_io_event_data_t *,void *context) {
   auto *self=static_cast<St77xxTransport *>(context);
@@ -51,12 +52,18 @@ void St77xxTransport::end() {
   if(busOwned_) spi_bus_free(SPI2_HOST);
   busOwned_=false; panelWidth_=panelHeight_=0;
 }
-void St77xxTransport::present(const uint16_t *pixels,int16_t x,int16_t y,int16_t width,int16_t height,int16_t stride) {
+bool St77xxTransport::present(const uint16_t *pixels,int16_t x,int16_t y,int16_t width,int16_t height,int16_t stride) {
   if(!driver_ || !pixels || width<=0 || height<=0 || stride<width ||
-     x<0 || y<0 || x+width>panelWidth_ || y+height>panelHeight_) return;
-  for(int row=0;row<height;++row) {
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(driver_,x,y+row,x+width,y+row+1,pixels+row*stride));
-    // Do not return while DMA still references the caller's reusable buffer.
+     x<0 || y<0 || x+width>panelWidth_ || y+height>panelHeight_) return false;
+  const int rowsPerTransfer=stride==width?height:1;
+  for(int row=0;row<height;row+=rowsPerTransfer) {
+    const auto err=esp_lcd_panel_draw_bitmap(driver_,x,y+row,x+width,y+row+rowsPerTransfer,pixels+row*stride);
+    if(err!=ESP_OK) {
+      logPrintf("[display] transfer rejected: %s\n",esp_err_to_name(err));
+      return false;
+    }
+    // Do not release/reuse staging memory until DMA has completed.
     xSemaphoreTake(done_,portMAX_DELAY);
   }
+  return true;
 }

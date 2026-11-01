@@ -6,6 +6,7 @@
 #include "Emotion.h"
 #include "ServoMotion.h"
 #include "Voice.h"
+#include "SpeechGesture.h"
 
 // Bunty's head during a conversation. It cocks its head while listening,
 // glances aside while thinking, and while speaking performs the gesture
@@ -27,6 +28,10 @@ class Dance {
   float tiltHome_ = 90.0f;
   bool claimed_ = false;
   bool homing_ = false;
+  bool gesturing_ = false,visualGesture_=false;
+  uint32_t visualGeneration_=0;
+  uint32_t gestureSince_ = 0;
+  speechGesture::Request gesture_;
   uint32_t lastTickAt_ = 0;
   uint32_t homingSince_ = 0;
 

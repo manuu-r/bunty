@@ -7,6 +7,8 @@
 #include "Config.h"
 #include "Fonts.h"
 #include "Power.h"
+#include "RuntimeTiming.h"
+#include "MuseText.h"
 #include "flow32/graphics/Display.h"
 #include "flow32/graphics/St77xxTransport.h"
 
@@ -51,6 +53,8 @@ constexpr int16_t kConfirmHeight = 66;
 constexpr int16_t kRejectTop = 228;
 
 uint8_t backlightDuty = 0;
+uint8_t backlightRequested = 0;
+runtime::Fade backlightFade;
 bool pairingVisible_ = false;
 uint32_t lastActivityAt = 0;
 uint8_t activityFrame = 0;
@@ -59,27 +63,6 @@ constexpr int16_t kActivityLeft = 94;
 constexpr int16_t kActivityTop = 254;
 constexpr int16_t kActivityWidth = 52;
 constexpr int16_t kActivityHeight = 20;
-
-// Bluetooth's rune: a spine, a flag at each end, and the two strokes that
-// cross it.
-void drawBluetoothIcon(int16_t cx, int16_t cy, uint16_t color) {
-  constexpr int16_t w = 3;
-  constexpr int16_t h = 5;
-  panel.drawLine(cx, cy - h, cx, cy + h, color);
-  panel.drawLine(cx, cy - h, cx + w, cy - h / 2, color);
-  panel.drawLine(cx + w, cy - h / 2, cx - w, cy + h / 2, color);
-  panel.drawLine(cx, cy + h, cx + w, cy + h / 2, color);
-  panel.drawLine(cx + w, cy + h / 2, cx - w, cy - h / 2, color);
-}
-
-// Three arcs over a dot. Adafruit's quarter-circle helper draws the top half
-// with the top-left and top-right corner bits set.
-void drawWifiIcon(int16_t cx, int16_t baseY, uint16_t color) {
-  for (int16_t r = 2; r <= 6; r += 2) {
-    panel.drawCircleHelper(cx, baseY, r, 0x1 | 0x2, color);
-  }
-  panel.fillCircle(cx, baseY, 1, color);
-}
 
 void drawActivityDots() {
   Guard guard;
@@ -110,8 +93,8 @@ bool begin() {
   renderMutex = xSemaphoreCreateRecursiveMutexStatic(&renderMutexStorage);
   if (!renderMutex) return false;
 
-  ledcSetup(kBacklightChannel, kBacklightPwmHz, 8);
-  ledcAttachPin(cfg::pin::kTftBacklight, kBacklightChannel);
+  if(!ledcSetup(kBacklightChannel, kBacklightPwmHz, 8) ||
+     !ledcAttachPin(cfg::pin::kTftBacklight, kBacklightChannel)) return false;
   ledcWrite(kBacklightChannel, 0);
 
   // The transport initializes SPI; Display then claims ~150 KB of PSRAM for
@@ -125,19 +108,17 @@ bool begin() {
 }
 
 void fadeBacklightTo(uint8_t targetDuty) {
-  constexpr uint8_t kSteps = 28;
-  const uint8_t ceiling = power::backlightCeiling();
-  if (targetDuty > ceiling) targetDuty = ceiling;
-  const int16_t startDuty = backlightDuty;
-  if (startDuty == targetDuty) return;
-  for (uint8_t step = 1; step <= kSteps; ++step) {
-    const int16_t duty =
-        startDuty +
-        (static_cast<int16_t>(targetDuty) - startDuty) * step / kSteps;
-    ledcWrite(kBacklightChannel, static_cast<uint8_t>(duty));
-    delay(targetDuty > startDuty ? 8 : 5);
-  }
-  backlightDuty = targetDuty;
+  Guard guard;
+  backlightRequested = targetDuty;
+  serviceBacklight();
+}
+
+void serviceBacklight() {
+  Guard guard;
+  const uint32_t now=millis();
+  backlightFade.target(std::min(backlightRequested,power::backlightCeiling()),now);
+  const auto duty=backlightFade.sample(now);
+  if(duty!=backlightDuty) { ledcWrite(kBacklightChannel,duty); backlightDuty=duty; }
 }
 
 void fadeBacklight(bool on) { fadeBacklightTo(on ? 255 : 0); }
@@ -215,27 +196,14 @@ void drawCentered(const GFXfont *font, const char *text, int16_t top,
   panel.print(text);
 }
 
-void drawTopBar(bool present) {
-  const bool online = WiFi.status() == WL_CONNECTED;
-  panel.fillRect(0, 0, kScreenWidth, kStatusBarHeight, kSurface);
-  drawBluetoothIcon(14, 16, kSuccess);
-  drawText(BuntyFonts::kBody, "PAIRED", 25, 21, kSuccess);
-  drawWifiIcon(149, 20, online ? kSuccess : kBorder);
-  drawText(BuntyFonts::kBody, online ? "ONLINE" : "OFFLINE", 162, 21,
-           online ? kSuccess : kMuted);
-  panel.drawFastHLine(0, kStatusBarHeight - 1, kScreenWidth, kBorder);
-  if (present) panel.present(0, 0, kScreenWidth, kStatusBarHeight);
-}
-
 void showPairing() {
   Guard guard;
   panel.fillScreen(kBackground);
-  // Keep every line inside a 216 px safe area. An 18 pt "PAIR IN GAUGE"
-  // heading measured 268 px wide on this 240 px panel.
-  drawCentered(BuntyFonts::kHeading, "PAIR BUNTY", 72, kText);
-  drawCentered(BuntyFonts::kBody, "Open Gauge on your Mac", 133, kMuted);
-  drawCentered(BuntyFonts::kBody, "Choose Pair Accessory", 165, kMuted);
-  drawCentered(BuntyFonts::kBody, "Then compare the code", 197, kMuted);
+  // Keep every line inside the 216 px safe area.
+  drawCentered(BuntyFonts::kHeading, "Pair Bunty", 72, kText);
+  drawCentered(BuntyFonts::kBody, "Open Muse > Devices", 133, kMuted);
+  drawCentered(BuntyFonts::kBody, "Enable Developer mode", 165, kMuted);
+  drawCentered(BuntyFonts::kBody, "Confirm pairing here", 197, kMuted);
   drawActivityDots();
   panel.present();
   pairingVisible_ = true;
@@ -244,7 +212,7 @@ void showPairing() {
 void servicePairingActivity() {
   if (!pairingVisible_) return;
   const uint32_t now = millis();
-  if (now - lastActivityAt < cfg::pairing::kActivityFrameMs) return;
+  if (now - lastActivityAt < cfg::ui::kPairingActivityFrameMs) return;
   lastActivityAt = now;
   activityFrame = (activityFrame + 1) % 3;
   drawActivityDots();
@@ -252,27 +220,11 @@ void servicePairingActivity() {
 
 bool pairingVisible() { return pairingVisible_; }
 
-void showNumericComparison(uint32_t pin) {
-  pairingVisible_ = false;
-  Guard guard;
-  char digits[7];
-  snprintf(digits, sizeof(digits), "%06lu", static_cast<unsigned long>(pin));
-  panel.fillScreen(kBackground);
-  drawCentered(BuntyFonts::kBody, "DOES THE MAC SHOW", 66, kMuted);
-  drawCentered(BuntyFonts::kComparison, digits, 112, kText);
-  panel.fillRoundRect(20, kConfirmTop, kScreenWidth - 40, kConfirmHeight, 12, kSuccess);
-  drawCentered(BuntyFonts::kBody, "Yes", kConfirmTop + 24, kBackground);
-  panel.fillRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kSurface);
-  panel.drawRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kBorder);
-  drawCentered(BuntyFonts::kBody, "No", kRejectTop + 24, kText);
-  panel.present();
-}
-
 void showPairingConfirmed() {
   pairingVisible_ = false;
   Guard guard;
   panel.fillScreen(kBackground);
-  drawCentered(BuntyFonts::kHeading, "CONFIRMED", 122, kSuccess);
+  drawCentered(BuntyFonts::kHeading, "Paired", 122, kSuccess);
   drawCentered(BuntyFonts::kBody, "Finishing secure setup", 174, kMuted);
   panel.present();
 }
@@ -281,8 +233,9 @@ void showError(const char *message) {
   pairingVisible_ = false;
   Guard guard;
   panel.fillScreen(kBackground);
-  drawCentered(BuntyFonts::kHeading, "Try again", 132, kDanger);
-  drawCentered(BuntyFonts::kBody, message, 176, kMuted);
+  muse::textPage(message,0,208,3,
+    [](const char *line){return textWidth(BuntyFonts::kBody,line);},
+    [](size_t row,const char *line){drawText(BuntyFonts::kBody,line,16,144+int(row)*22,kMuted);});
   panel.present();
   logPrintf("[pairing] %s\n", message);
 }
@@ -298,9 +251,8 @@ int16_t rowTop(uint8_t index) { return kFirstRowTop + index * kRowHeight; }
 void drawRow(uint8_t index, const char *label, const char *value,
              uint16_t accent, bool enabled) {
   const int16_t top = rowTop(index);
-  panel.fillRoundRect(10, top, kScreenWidth - 20, kRowHeight - 8, 10, kSurface);
-  panel.drawRoundRect(10, top, kScreenWidth - 20, kRowHeight - 8, 10, kBorder);
-  drawText(BuntyFonts::kBody, label, 24, top + 20, enabled ? accent : kMuted);
+  panel.drawFastHLine(16,top+kRowHeight-8,208,kBorder);
+  drawText(BuntyFonts::kBody,fitText(BuntyFonts::kBody,label,value && *value?126:200),20,top+20,enabled?accent:kMuted);
   if (value && *value) {
     drawTextRight(BuntyFonts::kBody, value, kScreenWidth - 24, top + 20, kMuted);
   }
@@ -312,7 +264,7 @@ void showSettings(const SettingsStatus &status) {
   settingsPaired_ = status.paired;
   Guard guard;
   panel.fillScreen(kBackground);
-  drawCentered(BuntyFonts::kHeading, "SETTINGS", 24, kText);
+  drawCentered(BuntyFonts::kHeading, "Settings", 24, kText);
 
   if (status.paired) {
     char signal[24];
@@ -324,9 +276,9 @@ void showSettings(const SettingsStatus &status) {
     drawRow(3, "Unpair", "", kDanger, true);
   } else {
     drawRow(0, "Not paired", "", kMuted, true);
-    drawRow(1, "Pair with a Mac", "", kAccent, true);
+    drawRow(1, "Pair with Muse", "", kAccent, true);
   }
-  drawCentered(BuntyFonts::kBody, "Touch anywhere else to close", 296, kMuted);
+  drawCentered(BuntyFonts::kBody, "Tap outside to return", 296, kMuted);
   panel.present();
 }
 
@@ -351,11 +303,10 @@ void showConfirm(const char *title, const char *detail) {
   drawCentered(BuntyFonts::kHeading, title, 48, kText);
   if (detail && *detail) drawCentered(BuntyFonts::kBody, detail, 108, kMuted);
 
-  panel.fillRoundRect(20, kConfirmTop, kScreenWidth - 40, kConfirmHeight, 12, kSuccess);
-  drawCentered(BuntyFonts::kBody, "Yes", kConfirmTop + 24, kBackground);
-  panel.fillRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kSurface);
-  panel.drawRoundRect(20, kRejectTop, kScreenWidth - 40, kConfirmHeight, 12, kBorder);
-  drawCentered(BuntyFonts::kBody, "No", kRejectTop + 24, kText);
+  panel.drawFastHLine(20,kConfirmTop+kConfirmHeight,kScreenWidth-40,kBorder);
+  drawCentered(BuntyFonts::kBody, "Confirm", kConfirmTop + 24, kText);
+
+  drawCentered(BuntyFonts::kBody, "Cancel", kRejectTop + 24, kText);
   panel.present();
 }
 
@@ -369,48 +320,11 @@ bool confirmRejectedAt(int16_t x, int16_t y) {
          y < kRejectTop + kConfirmHeight;
 }
 
-void showUnpaired() {
-  Guard guard;
-  panel.fillScreen(kBackground);
-  drawCentered(BuntyFonts::kHeading, "UNPAIRED", 121, kSuccess);
-  drawCentered(BuntyFonts::kBody, "Restarting in pairing mode", 174, kMuted);
-  panel.present();
-}
-
-void showSyncing(bool failed) {
-  Guard guard;
-  panel.fillScreen(kBackground);
-  drawTopBar(false);
-  drawCentered(BuntyFonts::kHeading, failed ? "FINDING MAC" : "CONNECTING", 91, kText);
-  drawCentered(BuntyFonts::kBody, failed ? "Open Gauge on your Mac" : "Looking for Gauge", 158, kMuted);
-  drawCentered(BuntyFonts::kBody, failed ? "Same Wi-Fi. Retrying..." : "Fetching your latest stats", 194, kMuted);
-  drawControls();
-  panel.present();
-}
-
-// Touch targets reach well past the drawn buttons, up into the space above
-// and in toward the middle: a fingertip on a 2" panel lands imprecisely.
-bool settingsControlAt(int16_t x, int16_t y) { return x < 96 && y >= 250; }
-bool voiceControlAt(int16_t x, int16_t y) { return x >= 144 && y >= 250; }
-
+// The quiet handle opens requested content; the face is a full-size Talk target.
+bool settingsControlAt(int16_t x,int16_t y) {return x>=72 && x<168 && y>=266;}
 void drawControls() {
-  panel.fillRect(0, 266, kScreenWidth, 54, kBackground);
-  for (int x : {2, 170}) panel.fillRoundRect(x, 268, 68, 50, 12, kSurface);
-
-  // Three sliders. A gear at this size came out as two concentric circles,
-  // which reads as a map pin rather than settings.
-  for (uint8_t row = 0; row < 3; ++row) {
-    const int16_t y = 283 + row * 10;
-    panel.drawFastHLine(20, y, 32, kText);
-    panel.fillCircle(row == 1 ? 42 : 29, y, 3, kText);
-  }
-
-  // Microphone: capsule, arc, stem, base.
-  panel.fillRoundRect(199, 277, 10, 20, 5, kText);
-  panel.drawCircleHelper(203, 293, 11, 0x8, kText);
-  panel.drawCircleHelper(204, 293, 11, 0x4, kText);
-  panel.drawFastVLine(203, 304, 7, kText);
-  panel.drawFastHLine(196, 311, 15, kText);
+  panel.fillRect(0,266,kScreenWidth,54,kBackground);
+  panel.fillRoundRect(100,302,40,3,1,kMuted);
 }
 
-}  // namespace ui
+} // namespace ui

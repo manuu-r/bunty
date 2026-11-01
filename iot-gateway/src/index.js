@@ -68,6 +68,10 @@ export default {
       return handleVoiceUiChat(request, env);
     }
 
+    if (url.pathname === "/v1/tts") {
+      return handleDeviceSpeak(request, env);
+    }
+
     if (url.pathname === VOICE_SPEAK_ROUTE) {
       return handleVoiceUiSpeak(request, env);
     }
@@ -237,32 +241,44 @@ async function handleVoiceUiChat(request, env) {
   }
 }
 
+/** TTS-only device route: Muse supplies the reply; no STT or LLM is called. */
+async function handleDeviceSpeak(request, env) {
+  if (request.method !== "POST") {
+    return errorResponse("method_not_allowed", "Use POST for this endpoint.", 405, { Allow: "POST" });
+  }
+  const authentication = await authenticateRequest(request, env);
+  if (authentication.response) return authentication.response;
+  return handleVoiceUiSpeak(request, env, authentication.device);
+}
+
 /**
  * Synthesizes a browser UI reply with the same trusted Aura voice used by the
  * live Bunty pipeline. This keeps browser fallback audio out of platform TTS.
  * @param {Request} request
  * @param {Record<string, any>} env
  */
-async function handleVoiceUiSpeak(request, env) {
+async function handleVoiceUiSpeak(request, env, device = null) {
   if (request.method !== "POST") {
     return errorResponse("method_not_allowed", "Use POST for this endpoint.", 405, {
       Allow: "POST",
     });
   }
 
-  try {
-    if (!(await hasVoiceUiSession(request, env))) {
-      return errorResponse("unauthorized", "Sign in to use voice.", 401);
+  if (!device) {
+    try {
+      if (!(await hasVoiceUiSession(request, env))) {
+        return errorResponse("unauthorized", "Sign in to use voice.", 401);
+      }
+    } catch (error) {
+      logFailure("voice_ui_configuration_invalid", error);
+      return errorResponse("service_unavailable", "Voice UI is not configured.", 503);
     }
-  } catch (error) {
-    logFailure("voice_ui_configuration_invalid", error);
-    return errorResponse("service_unavailable", "Voice UI is not configured.", 503);
   }
 
   const rateLimitResponse = await enforceRateLimit(
     env.DEVICE_RATE_LIMITER,
-    "voice-ui",
-    "voice_ui_tts",
+    device?.id || "voice-ui",
+    "tts",
   );
   if (rateLimitResponse) return rateLimitResponse;
 
@@ -289,7 +305,7 @@ async function handleVoiceUiSpeak(request, env) {
     );
   }
 
-  const requestId = `voice-ui:tts:${crypto.randomUUID()}`;
+  const requestId = `${device ? device.id : "voice-ui"}:tts:${crypto.randomUUID()}`;
   try {
     const audio = await env.AI.run(
       config.ttsModel,
@@ -300,9 +316,20 @@ async function handleVoiceUiSpeak(request, env) {
         container: "none",
         sample_rate: config.liveAudioSampleRate,
       },
-      { returnRawResponse: true, ...aiOptions(config, "voice-ui", requestId) },
+      { returnRawResponse: true, ...aiOptions(config, device?.id || "voice-ui", requestId) },
     );
-    return audioResponse(audio);
+    const response = audioResponse(audio);
+    if (device) {
+      if ((response.headers.get("Content-Type") || "").includes("json")) {
+        throw new TypeError("TTS returned JSON instead of audio.");
+      }
+      // The requested raw PCM is little endian, mono, at the configured rate.
+      const headers = new Headers(response.headers);
+      headers.set("Content-Type", `audio/l16;rate=${config.liveAudioSampleRate};channels=1`);
+      headers.set("X-Audio-Byte-Order", "little-endian");
+      return new Response(response.body, { status: response.status, headers });
+    }
+    return response;
   } catch (error) {
     const upstreamStatus = Number(error?.status);
     const rateLimited = upstreamStatus === 429;

@@ -364,3 +364,50 @@ test("physical-device route negotiates gateway turn detection only when requeste
     else delete globalThis.WebSocketPair;
   }
 });
+
+test("device TTS synthesizes Muse text without invoking STT or an LLM", async () => {
+  const { env, calls } = makeEnv();
+  env.AI = { async run(...args) {
+    calls.push(args);
+    return new Response(new Uint8Array([1, 0, 2, 0]), { headers: { "Content-Type": "audio/l16" } });
+  } };
+  const response = await worker.fetch(new Request("https://gateway.example/v1/tts", {
+    method: "POST", headers: { Authorization: `Bearer ${validToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "Reply supplied by Muse." }),
+  }), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "audio/l16;rate=16000;channels=1");
+  assert.equal(response.headers.get("x-audio-byte-order"), "little-endian");
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [1, 0, 2, 0]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "@cf/deepgram/aura-1");
+  assert.equal(calls[0][1].text, "Reply supplied by Muse.");
+  assert.equal(calls[0][1].encoding, "linear16");
+  assert.equal(calls[0][1].sample_rate, 16000);
+  assert.equal(calls[0][2].gateway.metadata.device_id, "device-01");
+});
+
+test("device TTS rejects missing credentials, oversized text, and rate limited requests", async () => {
+  const { env, calls } = makeEnv();
+  const request = (text, auth = true) => new Request("https://gateway.example/v1/tts", {
+    method: "POST", headers: { ...(auth ? { Authorization: `Bearer ${validToken}` } : {}), "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  assert.equal((await worker.fetch(request("Hello", false), env)).status, 401);
+  assert.equal((await worker.fetch(request("x".repeat(161)), env)).status, 400);
+  assert.equal((await worker.fetch(request(""), env)).status, 400);
+  env.DEVICE_RATE_LIMITER = { async limit() { return { success: false }; } };
+  assert.equal((await worker.fetch(request("Hello"), env)).status, 429);
+  assert.equal(calls.length, 0);
+});
+
+test("device TTS refuses an upstream JSON response instead of labelling it as PCM", async () => {
+  const { env } = makeEnv();
+  env.AI = { async run() { return Response.json({ error: "upstream failed" }); } };
+  const response = await worker.fetch(new Request("https://gateway.example/v1/tts", {
+    method: "POST", headers: { Authorization: `Bearer ${validToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "Hello." }),
+  }), env);
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, "upstream_error");
+});

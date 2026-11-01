@@ -58,11 +58,11 @@ bool Display::begin() {
     fb_ = static_cast<uint16_t *>(
         heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
-  mono_ = static_cast<uint8_t *>(heap_caps_calloc((bytes / 2 + 7) / 8, 1,
+  if (!fb_) mono_ = static_cast<uint8_t *>(heap_caps_calloc((bytes / 2 + 7) / 8, 1,
       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  line_ = static_cast<uint16_t *>(heap_caps_malloc(panel_.width * 2,
+  line_ = static_cast<uint16_t *>(heap_caps_malloc(panel_.width * 2 * kTransferRows,
       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-  if (!mono_ || !line_) {
+  if ((!fb_ && !mono_) || !line_) {
     end();
     return false;
   }
@@ -80,6 +80,7 @@ void Display::end() {
   heap_caps_free(line_);
   mono_ = nullptr;
   line_ = nullptr;
+  auraOpacity_=0;auraColor_=0;auraPending_=false;
   if (fb_ || transportBegun_) setBacklight(false);
   if (fb_) {
     heap_caps_free(fb_);
@@ -123,14 +124,7 @@ void Display::present(int16_t x, int16_t y, int16_t w, int16_t h) {
       const int top = max(int(y), ty * 16);
       const int right = min(int(x + w), min(int(panel_.width), tx * 16 + 16));
       const int bottom = min(int(y + h), min(int(panel_.height), ty * 16 + 16));
-      for (int row = top; row < bottom; ++row) {
-        for (int col = left; col < right; ++col) line_[col - left] = pixel(col, row);
-        // Synchronous transfer: this DMA-capable internal line is not reused
-        // until the transport returns. Never pass a PSRAM pointer to SPI.
-        transport_.present(line_, left, row, right - left, 1, right - left);
-        transferredPixels_ += right - left;
-        ++transfers_;
-      }
+      if(!transferRegion(left,top,right-left,bottom-top))return;
       for (int tile = first; tile <= tx; ++tile) {
         if (left <= tile * 16 && top == ty * 16 &&
             right >= min(int(panel_.width), tile * 16 + 16) &&
@@ -138,6 +132,48 @@ void Display::present(int16_t x, int16_t y, int16_t w, int16_t h) {
       }
     }
   }
+}
+
+uint16_t Display::auraPixel(int16_t x,int16_t y,uint16_t base) const {
+  if(!auraOpacity_)return base;
+  const int edge=min(min(int(x),int(y)),min(int(panel_.width-1-x),int(panel_.height-1-y)));
+  if(edge>=3)return base;
+  constexpr uint8_t falloff[]={15,9,3};
+  return blend565(auraColor_,base,uint8_t(auraOpacity_*falloff[edge]/15));
+}
+bool Display::transferRegion(int16_t x,int16_t y,int16_t w,int16_t h) {
+  if(w<=0 || h<=0)return true;
+  // The buffer holds eight full-width rows. Narrow edge strips can pack
+  // more rows into the same 3,840 bytes, reducing aura refresh to four submits.
+  const int rowsPerTransfer=panel_.width*kTransferRows/w;
+  for(int row=y;row<y+h;row+=rowsPerTransfer) {
+    const int rows=min(rowsPerTransfer,int(y+h-row));
+    for(int n=0;n<rows;++n) {
+      if(fb_)memcpy(line_+n*w,fb_+(row+n)*panel_.width+x,w*sizeof(uint16_t));
+      else for(int col=0;col<w;++col)line_[n*w+col]=pixel(x+col,row+n);
+      if(auraOpacity_)for(int col=0;col<w;++col)
+        line_[n*w+col]=auraPixel(x+col,row+n,line_[n*w+col]);
+    }
+    if(!transport_.present(line_,x,row,w,rows,w))return false;
+    transferredPixels_+=w*rows;++transfers_;
+  }
+  return true;
+}
+void Display::setAura(uint16_t color,uint8_t opacity) {
+  if(!ready())return;
+  opacity=min(uint8_t(15),opacity);
+  if(color!=auraColor_ || opacity!=auraOpacity_) {
+    auraColor_=color;auraOpacity_=opacity;auraPending_=true;
+  }
+  if(!auraPending_)return;
+  const int w=panel_.width,h=panel_.height;
+  const int edge=min(3,min(w/2,h/2));
+  if(edge<=0) {auraPending_=false;return;}
+  // These submits do not consume dirty tiles: pending content still gets its
+  // normal present(). Every normal submit also composes the current aura.
+  if(!transferRegion(0,0,w,edge) || !transferRegion(0,h-edge,w,edge) ||
+     !transferRegion(0,edge,edge,h-2*edge) || !transferRegion(w-edge,edge,edge,h-2*edge))return;
+  auraPending_=false;
 }
 
 uint16_t Display::pixel(int16_t x, int16_t y) const {
@@ -152,29 +188,31 @@ void Display::reportMemory() const {
   for (uint8_t tile : dirty_) dirty += tile != 0;
   logPrintf("[memory] fb color_psram=%u mono_internal=%u line_dma=%u dirty=%u pixels=%lu transfers=%lu\n",
       fb_ ? unsigned(bufferBytes()) : 0, mono_ ? unsigned((bufferBytes() / 2 + 7) / 8) : 0,
-      line_ ? unsigned(panel_.width * 2) : 0, dirty,
+      line_ ? unsigned(panel_.width * 2 * kTransferRows) : 0, dirty,
       (unsigned long)transferredPixels_, (unsigned long)transfers_);
 }
 
 void Display::drawPixel(int16_t x, int16_t y, uint16_t color) {
-  if (!mono_ || x < 0 || y < 0 || x >= panel_.width || y >= panel_.height) return;
+  if ((!fb_ && !mono_) || x < 0 || y < 0 || x >= panel_.width || y >= panel_.height) return;
   const size_t index = size_t(y) * panel_.width + x;
+  if (fb_) {
+    if (fb_[index] != color) { fb_[index] = color; markDirty(x,y); }
+    return;
+  }
   const bool lit = (((color >> 11) & 31) * 8 + ((color >> 5) & 63) * 4 + (color & 31) * 8) >= 192;
-  const uint16_t output = fb_ ? color : (lit ? 0xffff : 0);
-  if (pixel(x, y) != output) markDirty(x, y);
-  if (fb_) fb_[index] = color;
+  if (pixel(x,y) != (lit ? 0xffff : 0)) markDirty(x,y);
   if (lit) mono_[index / 8] |= 1 << (index % 8);
   else mono_[index / 8] &= ~(1 << (index % 8));
 }
 
 void Display::blendPixel(int16_t x, int16_t y, uint16_t fg, uint8_t cover4) {
-  if (!mono_ || cover4 == 0) return;
+  if ((!fb_ && !mono_) || cover4 == 0) return;
   if (x < 0 || y < 0 || x >= panel_.width || y >= panel_.height) return;
   drawPixel(x, y, blend565(fg, pixel(x, y), cover4));
 }
 
 void Display::writeRow(int16_t x, int16_t y, const uint16_t *colors, int16_t count) {
-  if (!mono_ || !colors || y < 0 || y >= panel_.height) return;
+  if ((!fb_ && !mono_) || !colors || y < 0 || y >= panel_.height) return;
   if (x < 0) {
     colors -= x;
     count += x;
@@ -183,8 +221,12 @@ void Display::writeRow(int16_t x, int16_t y, const uint16_t *colors, int16_t cou
   if (x + count > panel_.width) count = panel_.width - x;
   if (count <= 0) return;
   const size_t start = size_t(y) * panel_.width + x;
-  if (fb_) memcpy(fb_ + start, colors, size_t(count) * sizeof(uint16_t));
-  for (int16_t i = 0; i < count; ++i) {
+  if (fb_) {
+    const size_t bytes=size_t(count)*sizeof(uint16_t);
+    if (!memcmp(fb_+start,colors,bytes)) return;
+    memcpy(fb_+start,colors,bytes);
+  }
+  if (mono_) for (int16_t i = 0; i < count; ++i) {
     const uint16_t color = colors[i];
     const size_t index = start + i;
     const bool lit = (((color >> 11) & 31) * 8 + ((color >> 5) & 63) * 4 + (color & 31) * 8) >= 192;
@@ -195,7 +237,7 @@ void Display::writeRow(int16_t x, int16_t y, const uint16_t *colors, int16_t cou
 }
 
 void Display::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
-  if (!mono_ || y < 0 || y >= panel_.height) return;
+  if ((!fb_ && !mono_) || y < 0 || y >= panel_.height) return;
   if (x < 0) {
     w += x;
     x = 0;
@@ -206,7 +248,7 @@ void Display::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
 }
 
 void Display::drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
-  if (!mono_ || x < 0 || x >= panel_.width) return;
+  if ((!fb_ && !mono_) || x < 0 || x >= panel_.width) return;
   if (y < 0) {
     h += y;
     y = 0;
@@ -227,7 +269,7 @@ void Display::fillRect(int16_t x, int16_t y, int16_t w, int16_t h,
 
 void Display::fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h,
                             int16_t r, uint16_t color) {
-  if (!mono_ || w <= 0 || h <= 0) return;
+  if ((!fb_ && !mono_) || w <= 0 || h <= 0) return;
   r = clampRadius(w, h, r);
   if (r <= 0) {
     fillRect(x, y, w, h, color);

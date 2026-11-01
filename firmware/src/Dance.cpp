@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "Power.h"
+#include "Log.h"
 
 namespace {
 
@@ -28,7 +29,10 @@ void Dance::attach(ServoMotion *turn, uint8_t turnHome, ServoMotion *tilt,
 }
 
 void Dance::aim(float turnOffset, float tiltOffset, float degreesPerSecond) {
-  const float rate = power::servoSpeed(degreesPerSecond);
+  // Conversation movements share the small-arc Dance power reservation.
+  turnOffset=fmaxf(-18.0f,fminf(18.0f,turnOffset));
+  tiltOffset=fmaxf(-15.0f,fminf(15.0f,tiltOffset));
+  const float rate = power::servoSpeed(fminf(60.0f,degreesPerSecond));
   if (turn_) turn_->follow(turnHome_ + turnOffset, rate);
   if (tilt_) tilt_->follow(tiltHome_ + tiltOffset, rate);
 }
@@ -39,6 +43,31 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
   const float dt = lastTickAt_ == 0 ? kTickMs / 1000.0f : (now - lastTickAt_) / 1000.0f;
   lastTickAt_ = now;
 
+  if(visualGesture_&&visualGeneration_!=speechGesture::cancelGeneration.load())
+    gesturing_=visualGesture_=false;
+  if(!claimed_&&(phase!=Voice::Phase::Off||speechGesture::visualWaiting())) {
+    if(!power::claim(power::Load::kDance))return;
+    claimed_=true;
+  }
+  const uint32_t generation=speechGesture::cancelGeneration.load();
+  if(claimed_&&speechGesture::takeVisual(gesture_,now)) {
+    gesturing_=visualGesture_=true;gestureSince_=now;homing_=false;
+    visualGeneration_=generation;
+    logPrintf("[motion] meme=%s speed=%u duration=%u ms turn=%u tilt=%u power=%s\n",
+      speechGesture::name(gesture_.kind),unsigned(gesture_.speed),
+      unsigned(speechGesture::visualDuration(gesture_.speed)),unsigned(turn_!=nullptr),unsigned(tilt_!=nullptr),power::modeName());
+  }
+  if(visualGesture_&&visualGeneration_!=speechGesture::cancelGeneration.load())
+    gesturing_=visualGesture_=false;
+  // A media gesture owns both axes even during Listening, Thinking or silence.
+  if(visualGesture_&&gesturing_) {
+    const uint32_t elapsed=now-gestureSince_;
+    const auto pose=speechGesture::visualPose(gesture_.kind,elapsed,gesture_.speed);
+    aim(pose.yaw,pose.pitch,speechGesture::rate(gesture_.speed));power::markBusy();
+    if(elapsed>=speechGesture::visualDuration(gesture_.speed))gesturing_=visualGesture_=false;
+    return;
+  }
+  if (phase != Voice::Phase::Speaking) gesturing_=false;
   if (phase == Voice::Phase::Off) {
     if (!claimed_) return;
     if (!homing_) {
@@ -56,10 +85,6 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
   }
 
   homing_ = false;
-  if (!claimed_) {
-    if (!power::claim(power::Load::kDance)) return;
-    claimed_ = true;
-  }
 
   switch (phase) {
     case Voice::Phase::Connecting:
@@ -74,6 +99,15 @@ void Dance::service(Voice::Phase phase, Emotion emotion, uint32_t now) {
       break;
     case Voice::Phase::Off:
       return;
+  }
+
+  if(speechGesture::take(gesture_,now)) {gesturing_=true;gestureSince_=now;}
+  if(gesturing_) {
+    const uint32_t elapsed=now-gestureSince_;
+    const auto pose=speechGesture::pose(gesture_.kind,elapsed,gesture_.speed);
+    aim(pose.yaw,pose.pitch,speechGesture::rate(gesture_.speed));
+    if(elapsed>=speechGesture::duration(gesture_.speed)) gesturing_=false;
+    return;
   }
 
   // Glide between emotions rather than switching gesture in one jump. The

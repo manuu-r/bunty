@@ -30,5 +30,15 @@ set +u
 source "$IDF_PATH/export.sh" >/dev/null
 set -u
 cd "$firmware_dir"
+python scripts/prepare_deps.py
+python scripts/adapt_muse.py
 if [[ $# -eq 0 ]]; then set -- build; fi
+# Muse uses its own configuration so the old Bluedroid build stays recoverable.
+custom_build=false
+for argument in "$@"; do
+  if [[ "$argument" == -B || "$argument" == --build-dir || "$argument" == --build-dir=* ]]; then custom_build=true; fi
+done
+if [[ "$custom_build" == false ]]; then
+  exec idf.py -B build-muse -D SDKCONFIG=build-muse/sdkconfig "$@"
+fi
 exec idf.py "$@"

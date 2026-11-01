@@ -1,4 +1,5 @@
 #include "ServoMotion.h"
+#include "ServoFollow.h"
 #include "Log.h"
 #include "Memory.h"
 
@@ -11,7 +12,7 @@ bool ServoMotion::begin(uint8_t pin, uint8_t channel, uint8_t initialAngle) {
   startAngle_ = start;
   targetAngle_ = start;
   if (ledcSetup(channel_, kFrequencyHz, kResolutionBits) <= 0) return false;
-  ledcAttachPin(pin, channel_);
+  if(!ledcAttachPin(pin, channel_)) return false;
   ready_ = true;
   moving_ = false;
   lastUpdateMs_ = millis();
@@ -69,7 +70,7 @@ void ServoMotion::task(void *context) {
       memory::sampleTask(motion->channel_ == 2 ? "servo-turn" : "servo-tilt");
       sampled = millis();
     }
-    vTaskDelayUntil(&tick, pdMS_TO_TICKS(10));
+    vTaskDelayUntil(&tick, pdMS_TO_TICKS(kUpdateIntervalMs));
   }
 }
 
@@ -86,18 +87,9 @@ void ServoMotion::applyFollow(float angle, float maxDegreesPerSecond) {
 void ServoMotion::serviceFollow(uint32_t now) {
   const float elapsedMs = static_cast<float>(now - lastUpdateMs_);
   lastUpdateMs_ = now;
-  const float remaining = targetAngle_ - currentAngle_;
-  if (fabsf(remaining) < 0.2f) {
-    moving_ = false;
-    return;
-  }
-  // First-order approach, capped in rate: quick syllables soften into a bob
-  // rather than a twitch, and a large jump cannot yank the linkage.
-  float step = remaining * (1.0f - expf(-elapsedMs / kFollowTimeConstantMs));
-  const float limit = followRate_ * elapsedMs / 1000.0f;
-  if (step > limit) step = limit;
-  if (step < -limit) step = -limit;
-  currentAngle_ += step;
+  const auto step=servoFollow::advance(currentAngle_,targetAngle_,followRate_,elapsedMs,kFollowTimeConstantMs);
+  if(!step.moving) {moving_=false;return;}
+  currentAngle_=step.angle;
   writeAngle(currentAngle_);
 }
 

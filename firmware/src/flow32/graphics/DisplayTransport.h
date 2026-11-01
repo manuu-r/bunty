@@ -16,6 +16,8 @@ public:
   virtual bool begin(const DisplayPanel &panel) = 0;
   virtual void end() {}
   virtual void setBacklight(bool /*on*/) {}
-  virtual void present(const uint16_t *pixels, int16_t x, int16_t y,
+  // Synchronous: source storage is reusable on return, including on failure.
+  // False leaves the framebuffer dirty so the caller can retry.
+  virtual bool present(const uint16_t *pixels, int16_t x, int16_t y,
                        int16_t width, int16_t height, int16_t stride) = 0;
 };
