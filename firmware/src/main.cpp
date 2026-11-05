@@ -10,6 +10,8 @@
 #include "Dance.h"
 #include "IotGatewayCredentials.h"
 #include "Voice.h"
+#include "Hearing.h"
+#include "SoundBearing.h"
 #include "Muse.h"
 #include "MuseDisplay.h"
 #include "Shell.h"
@@ -669,6 +671,44 @@ void serviceVoiceAura() {
   ui::Guard guard;ui::display().setAura(aura.color,aura.opacity);
 }
 
+// Listening turns the head toward the loudest coherent sound. Bearings come
+// from the microphone worker; this only decides whether the head should move,
+// and the servo's follow filter makes the move smooth.
+void serviceHearing() {
+  if(!runtimeStarted || !hearing::active())return;
+  static hearing::LookAt look([] {
+    hearing::LookParams params;
+    params.deadzoneDegrees=cfg::hearing::kDeadzoneDegrees;
+    params.maxTurnDegrees=cfg::hearing::kMaxTurnDegrees;
+    params.cooldownMs=cfg::hearing::kTurnCooldownMs;
+    params.micsOnHead=cfg::hearing::kMicsOnHead;
+    return params;
+  }());
+  static bool wasListening=false;
+  const bool listening=voice.phase()==Voice::Phase::Listening;
+  // Servo whine and board shake would corrupt the time difference.
+  if(dance.headMoving())hearing::hold();
+  if(!listening) {
+    if(wasListening) {
+      wasListening=false;
+      look.reset();
+      hearing::reset();
+      dance.setLookBias(0.0f);
+    }
+    return;
+  }
+  wasListening=true;
+  hearing::Bearing heard;
+  const bool valid=hearing::bearing(&heard);
+  if(!look.update(valid,heard.degrees,millis()))return;
+  dance.setLookBias(cfg::hearing::kServoSign*look.target());
+  hearing::hold();
+  // Microphones on the head now hear relative to its new pose: start afresh.
+  if(cfg::hearing::kMicsOnHead)hearing::reset();
+  logPrintf("[hearing] looking %+.0f deg (source %+.0f, confidence %u)\n",
+    double(look.target()),double(heard.degrees),unsigned(heard.confidence));
+}
+
 void loop() {
   const int64_t loopStarted=esp_timer_get_time();
   ui::serviceBacklight();
@@ -677,6 +717,7 @@ void loop() {
   }
   if (!setupReady) { delay(100); return; }
   power::service();
+  serviceHearing();
   serviceVoiceAura();
   serviceSpeechPicture();
   muse::serviceDisplay();

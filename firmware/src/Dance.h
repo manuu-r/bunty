@@ -18,6 +18,11 @@ class Dance {
   // Call from loop(); paces itself. The servos are Dance's while active().
   void service(const Voice &voice, uint32_t now);
   bool active() const { return claimed_; }
+  // Where to look while listening, in degrees from home (positive turns to the
+  // servo's positive side). The servo follow filter makes the turn smooth.
+  void setLookBias(float degrees) { lookBias_ = degrees; }
+  // Either servo is travelling: the microphones should not trust what they hear.
+  bool headMoving() const { return (turn_ && turn_->moving()) || (tilt_ && tilt_->moving()); }
 
  private:
   void aim(float turnOffset, float tiltOffset, float degreesPerSecond);
@@ -37,6 +42,7 @@ class Dance {
 
   cfg::dance::Style style_ = cfg::dance::kStyles[0];
   float beat_ = 0.0f;
+  float lookBias_ = 0.0f;
   float yawPhase_ = 0.0f;
   float tiltPhase_ = 0.0f;
 };

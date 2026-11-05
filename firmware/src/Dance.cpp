@@ -79,6 +79,7 @@ void Dance::service(const Voice &voice, uint32_t now) {
     const bool settled = !(turn_ && turn_->moving()) && !(tilt_ && tilt_->moving());
     if ((settled && now - homingSince_ > 100) || now - homingSince_ > 3000) {
       power::release(power::Load::kDance);
+      lookBias_ = 0.0f;
       claimed_ = homing_ = false;
       style_ = kStyles[0];
     }
@@ -90,7 +91,8 @@ void Dance::service(const Voice &voice, uint32_t now) {
   switch (phase) {
     case Voice::Phase::Connecting:
     case Voice::Phase::Listening:
-      aim(0.0f, kListenTiltDegrees, kPoseDegreesPerSecond);
+      aim(lookBias_, kListenTiltDegrees,
+          lookBias_ == 0.0f ? kPoseDegreesPerSecond : cfg::hearing::kLookDegreesPerSecond);
       return;
     case Voice::Phase::Thinking:
     case Voice::Phase::Finishing:

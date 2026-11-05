@@ -112,3 +112,10 @@ trap 'rm -rf "$test_dir"' EXIT
   -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
   -Isrc tests/host/visual_gesture_test.cpp -o "$test_dir/visual_gesture_test"
 "$test_dir/visual_gesture_test"
+
+# GCC-PHAT, bearing tracker, head aim and the 48->16 kHz decimator. -O1 keeps
+# the synthetic-signal checks quick under the sanitizers.
+"${CXX:-c++}" -std=c++17 -O1 -Wall -Wextra -Werror \
+  -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Isrc tests/host/hearing_test.cpp -o "$test_dir/hearing_test"
+"$test_dir/hearing_test"

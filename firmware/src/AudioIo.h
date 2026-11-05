@@ -3,14 +3,16 @@
 #include "Runtime.h"
 #include <atomic>
 #include "CaptureGate.h"
+#include "Decimator.h"
 #include <driver/i2s_std.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/stream_buffer.h>
 
-// The two INMP441-style microphones on one I2S bus, reduced to the 16 kHz mono
-// linear16 the gateway expects. A reader task owns the port; while capture is
-// on, PCM accumulates in a PSRAM ring so nothing said during a TLS handshake
-// is lost.
+// The two INMP441-style microphones on one I2S bus, sampled at cfg::audio::
+// kMicSampleRate and reduced to the 16 kHz mono linear16 the gateway expects.
+// A reader task owns the port; while capture is on, PCM accumulates in a PSRAM
+// ring so nothing said during a TLS handshake is lost. The same task hands both
+// raw channels to hearing:: for sound direction.
 class Microphone {
  public:
   bool begin();
@@ -38,6 +40,8 @@ class Microphone {
   std::atomic<uint32_t> level_{0};
   std::atomic<uint32_t> dropped_{0};
 
+  audio::Decimator decimator_;
+  uint32_t decimatedSession_ = 0;
   int32_t dcLeft_ = 0;
   int32_t dcRight_ = 0;
   uint64_t energyLeft_ = 0;

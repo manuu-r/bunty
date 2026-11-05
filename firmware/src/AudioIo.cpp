@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 
 #include "Config.h"
+#include "Hearing.h"
 #include "InternalAllocation.h"
 #include "Log.h"
 #include "Memory.h"
@@ -12,12 +13,14 @@ namespace {
 
 using namespace cfg::audio;
 
-constexpr size_t kReadFrames = kSampleRate / 50;  // 20 ms
+constexpr size_t kReadFrames = kMicReadFrames;  // 10 ms of capture-rate frames
+constexpr size_t kOutputFrames = kReadFrames / kMicDecimation;
+constexpr size_t kLevelFrames = kSampleRate / 50;  // the level is a 20 ms RMS of the 16 kHz output
 constexpr size_t kChunkFrames = 128;
 
-// Energy is tracked as 4096 x mean square. -12 dBFS sustained, in the
-// post-shift domain where full scale is 2^18, marks a slot as noise.
-constexpr uint64_t kBrokenSlotEnergy = 4096ull * 65536ull * 65536ull;
+// Energy is tracked as 2^kMicEnergyShift x mean square. -12 dBFS sustained, in
+// the post-shift domain where full scale is 2^18, marks a slot as noise.
+constexpr uint64_t kBrokenSlotEnergy = (1ull << kMicEnergyShift) * 65536ull * 65536ull;
 
 int16_t clip16(int32_t value) {
   if (value > INT16_MAX) return INT16_MAX;
@@ -37,13 +40,16 @@ bool Microphone::begin() {
     return false;
   }
   ring_ = xStreamBufferCreateStatic(kCaptureRingBytes + 1, 1, storage, &ringControl_);
+  decimator_.configure(kMicDecimation);
+  // Direction finding is optional: without it the voice path is unchanged.
+  hearing::begin();
 
   memory::InternalAllocationScope internal;
   i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(cfg::kMicrophonePort, I2S_ROLE_MASTER);
   channel.dma_desc_num = 6;
-  channel.dma_frame_num = 160;
+  channel.dma_frame_num = kMicDmaFrames;
   i2s_std_config_t config = {};
-  config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kSampleRate);
+  config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kMicSampleRate);
   config.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
   config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
   config.gpio_cfg.bclk = gpio_num_t(cfg::pin::kMicBclk);
@@ -102,7 +108,9 @@ void Microphone::setCapturing(bool capturing) {
 void Microphone::readOnce() {
   const uint32_t session=capture_.session();
   static int32_t slots[kReadFrames * 2];
-  static int16_t mono[kReadFrames];
+  static int16_t mono[kOutputFrames];
+  // Both capsules at the capture rate, for direction finding.
+  static int16_t rawLeft[kReadFrames], rawRight[kReadFrames];
   // Which capsules are actually wired, reported only when it changes.
   static int8_t reportedSlots = -1;
   const int8_t slots_ = int8_t((energyLeft_ > kBrokenSlotEnergy ? 1 : 0) |
@@ -118,13 +126,21 @@ void Microphone::readOnce() {
     return;
   }
   if(!capture_.current(session)) return; // drain DMA while idle, skip DSP
+  if (session != decimatedSession_) {
+    // A new conversation: no filter history or half-filled window from the last.
+    decimatedSession_ = session;
+    decimator_.reset();
+    hearing::gap();
+  }
   const size_t frames = bytesRead / (2 * sizeof(int32_t));
+  size_t outputs = 0;
+  bool bothWired = true;
   for (size_t i = 0; i < frames; ++i) {
     const int32_t left = audio::removeDc(slots[2 * i] >> cfg::audio::kMicShift, dcLeft_);
     const int32_t right = audio::removeDc(slots[2 * i + 1] >> cfg::audio::kMicShift, dcRight_);
     // Slowly tracked per-slot energy decides which capsules are really wired.
-    energyLeft_ += uint64_t(int64_t(left) * left) - (energyLeft_ >> 12);
-    energyRight_ += uint64_t(int64_t(right) * right) - (energyRight_ >> 12);
+    energyLeft_ += uint64_t(int64_t(left) * left) - (energyLeft_ >> kMicEnergyShift);
+    energyRight_ += uint64_t(int64_t(right) * right) - (energyRight_ >> kMicEnergyShift);
     // An undriven slot (a mic whose L/R strap floats or matches the other's)
     // reads as bus noise near full scale; real room audio never sits there.
     const bool leftBroken = energyLeft_ > kBrokenSlotEnergy;
@@ -138,17 +154,27 @@ void Microphone::readOnce() {
     else if (energyLeft_ * kMicSlotRatio < energyRight_) mixed = right;
     else if (energyRight_ * kMicSlotRatio < energyLeft_) mixed = left;
     else mixed = (left + right) / 2;
-    mono[i] = clip16(mixed);
-    levelSum_ += uint64_t(int64_t(mono[i]) * mono[i]);
+    rawLeft[i] = clip16(left);
+    rawRight[i] = clip16(right);
+    bothWired = bothWired && !leftBroken && !rightBroken;
+    int32_t filtered;
+    if (decimator_.push(mixed, filtered)) {
+      mono[outputs] = clip16(filtered);
+      levelSum_ += uint64_t(int64_t(mono[outputs]) * mono[outputs]);
+      ++outputs;
+    }
   }
-  levelCount_ += frames;
-  if (levelCount_ >= kReadFrames) {
+  // A time difference needs two working capsules; a gap discards the window.
+  if (bothWired) hearing::push(rawLeft, rawRight, frames);
+  else hearing::gap();
+  levelCount_ += outputs;
+  if (levelCount_ >= kLevelFrames) {
     level_ = static_cast<uint32_t>(sqrtf(static_cast<float>(levelSum_ / levelCount_)));
     levelSum_ = 0;
     levelCount_ = 0;
   }
-  if (frames == 0 || !capture_.beginWrite(session)) return;
-  const size_t bytes = frames * sizeof(int16_t);
+  if (outputs == 0 || !capture_.beginWrite(session)) return;
+  const size_t bytes = outputs * sizeof(int16_t);
   const size_t sent = xStreamBufferSend(ring_, mono, bytes, 0);
   capture_.endWrite();
   if (sent != bytes) dropped_ += bytes - sent;

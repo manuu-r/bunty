@@ -191,6 +191,25 @@ constexpr int kMicShift = 13;
 constexpr uint32_t kMicSlotRatio = 8;
 constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow Muse uplink setup
 
+// The capsules are sampled at 48 kHz, where the delay between them spans about
+// +/-8 samples instead of +/-3, which is what makes a bearing finer than
+// left/centre/right possible. A decimating filter turns that into the 16 kHz
+// mono the voice path was built for. Set kMicSampleRate equal to kSampleRate to
+// bypass the filter and run the old 16 kHz capture (direction finding then
+// has coarse resolution).
+constexpr uint32_t kMicSampleRate = 48000;
+constexpr unsigned kMicDecimation = kMicSampleRate / kSampleRate;
+static_assert(kMicSampleRate % kSampleRate == 0 && kMicDecimation >= 1 && kMicDecimation <= 4,
+              "the capture rate must be a small whole multiple of the voice rate");
+constexpr size_t kMicReadFrames = kMicSampleRate / 100;  // 10 ms per read
+static_assert(kMicReadFrames % kMicDecimation == 0, "reads must hold whole output samples");
+// INMP441 clock limit: 64 bit clocks per frame at 48 kHz is 3.07 MHz, under 3.2.
+static_assert(kMicSampleRate <= 50000, "INMP441 supports at most 50 kHz");
+// 30 ms of DMA at 48 kHz (was 60 ms at 16 kHz), in internal RAM either way.
+constexpr int kMicDmaFrames = kMicDecimation == 1 ? 160 : 240;
+// The wiring check averages over roughly a quarter second at either rate.
+constexpr int kMicEnergyShift = kMicDecimation == 1 ? 12 : 14;
+
 constexpr uint8_t kVolumePercent = 95;
 constexpr int kSpeakerDmaBuffers = 4;
 constexpr int kSpeakerDmaFrames = 240;
@@ -266,6 +285,49 @@ constexpr bool stylesFit() {
 static_assert(stylesFit(), "a style clipped by the power reservation loses its character");
 constexpr uint32_t kTickMs = 20;
 }  // namespace dance
+
+// -------------------------------------------------------- sound direction ---
+
+// Two INMP441 capsules on one I2S bus: the arrival-time difference between them
+// gives the angle of a sound. See HEARING.md.
+namespace mic {
+// Centre to centre. MEASURE THIS: every bearing scales directly with it.
+constexpr float kSpacingMm = 60.0f;
+constexpr float kSpeedOfSoundMmPerMs = 343.0f;  // 20 C, dry air
+// Swap if Bunty turns away from the talker: it depends on how the L/R straps
+// were soldered, and on which side is Bunty's left.
+constexpr bool kSwapChannels = false;
+}  // namespace mic
+
+namespace hearing {
+constexpr bool kEnabled = true;
+constexpr size_t kWindowSamples = 1024;  // 21 ms at 48 kHz
+constexpr size_t kFftSize = 2048;        // zero padded: no circular wrap in the lag range
+// Speech lives here; below it is hum and servo whine, above it the capsules
+// and the room add more phase noise than information.
+constexpr float kBandLowHz = 300.0f;
+constexpr float kBandHighHz = 5000.0f;
+// RMS after the capture gain; matches the VAD's idea of speech.
+constexpr uint32_t kMinimumRms = 500;
+constexpr float kMaxLevelRatio = 4.0f;
+constexpr float kMinimumCoherence = 0.12f;
+constexpr float kAgreeDegrees = 15.0f;
+constexpr size_t kMinimumAgreeing = 3;
+constexpr uint32_t kFreshMs = 1500;
+// The servo is loud and shakes the board: ignore the mics while it moves and
+// for this long after.
+constexpr uint32_t kSettleMs = 250;
+// A head that twitches at every syllable reads as nervous, not attentive.
+constexpr float kDeadzoneDegrees = 10.0f;
+// Bound by the speech-dance power reservation, which the listening pose uses.
+constexpr float kMaxTurnDegrees = dance::kMaxYawDegrees;
+constexpr uint32_t kTurnCooldownMs = 800;
+constexpr float kLookDegreesPerSecond = 40.0f;
+// +1 if a positive servo offset turns Bunty to its right, -1 if to its left.
+constexpr float kServoSign = 1.0f;
+// True if the microphones are mounted on the turning head rather than the base.
+constexpr bool kMicsOnHead = false;
+}  // namespace hearing
 
 // --------------------------------------------------------------- network ---
 
