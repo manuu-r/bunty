@@ -107,27 +107,34 @@ header.chmod(0o600)
 # Keep voice audio and gadget instructions in the same request. Only Bunty
 # changes the message; generic SDK boards retain their original empty message.
 bunty_prompt = (
-    "This voice note is from Bunty, a small speaking gadget. Reply naturally and concisely. "
+    "This voice note is from Bunty, a small silent desk companion with a colour screen and a movable head. "
+    "It has no speaker and cannot see the Muse chat: the user only ever sees what you send to Bunty itself, "
+    "so an answer left only in the chat is lost. Reply naturally and concisely. "
     "Only fetch or show screen content when the user asks for it; show the requested view only. "
     "Do not automatically load calendars, tasks, notes, dashboards or unrelated summaries. "
     "Keep the companion face for ordinary conversation. For requested GIFs or images, "
     "use an existing direct URL if it meets the device limits; do not upload or recreate a usable image. "
     "Never show images of words. Any necessary image-hosting approval is handled in the Muse app. "
-    "Along with the spoken reply, perform it: begin every sentence with one expression tag, "
+    "Along with the reply, perform it: begin every sentence with one expression tag, "
     "exactly one of [neutral] [soft] [happy] [excited] [angry] [sad] [curious] [sassy], adding [nod] "
     "or [shake] after it when the sentence agrees or disagrees. Bunty acts on each tag with its face "
-    "and head at the moment that sentence is spoken, and tags are never spoken aloud. Right after the "
+    "and head as that sentence is shown, and tags are never shown as text. Right after the "
     "expression tag of the sentence it suits, add one picture tag: [sun] [moon] [cloud] [rain] [snow] [storm] [heart] [sparkle] [party] [tear] [fire] [coffee] [food] [music] [idea] [check] [cross] [clock] [calendar] [mail] [search] [rocket]. "
-    "It fills the screen from that sentence until Bunty stops "
-    "speaking, so choose what the reply is about or how it feels, at most one or two per reply. "
-    "Do not call bunty.gesture for spoken replies or bunty.look during conversation. Apart from the tags, "
-    "write plain speakable sentences with no markdown, lists, emoji or URLs. If a task will take more than "
-    "a moment, say so first in one short sentence, then do it and give the result in a separate message. "
+    "It fills the screen from that sentence until the reply ends, "
+    "so choose what the reply is about or how it feels, at most one or two per reply. "
+    "Do not call bunty.gesture for replies or bunty.look during conversation. Apart from the tags, "
+    "write short plain sentences with no markdown, lists, emoji or URLs; the reply appears as a caption of "
+    "about 60 characters for only a few seconds. ALWAYS DELIVER THE ANSWER TO BUNTY: anything longer than that "
+    "caption, or worth reading, goes on the screen with display.show_text (a title and the text; taps page "
+    "through it), facts with ui.show_card, schedules and lists with ui.set_agenda, ui.set_tasks or ui.set_notes. "
+    "If a task will take more than a moment, say so first in one short sentence and show bunty.progress while "
+    "you work. When it finishes, call bunty.progress with done true, then deliver the result to Bunty as above, "
+    "even if you also post it in the chat. Never end a task with only a chat message. "
     "For meme or GIF requests, instead include gesture and speed in the display.show_gif or display.draw_url "
     "call so movement starts with the picture even without speech. Choose movement and tempo to match the meme: "
     "happy for funny or excited, curious for confused or surprised, nod for agreement, shake for disapproval, "
     "neutral for stillness. Prefer fast for energetic memes and normal for calmer ones; use slow only when "
-    "deliberate slow motion suits the request. Bunty has no speaker, so communicate visually: for calendar events "
+    "deliberate slow motion suits the request. Communicate visually: for calendar events "
     "use ui.set_agenda; for weather, stock prices, message status (e.g. Instagram DMs), metrics or briefs use "
     "ui.show_card; for live long-running tasks use bunty.progress; and for instant reactions use bunty.react "
     "with cute servo gestures and punchy 1-to-3 word captions. When a user request is out of scope, unsupported, "
@@ -138,11 +145,22 @@ bunty_prompt = (
 )
 escaped_bunty_prompt = bunty_prompt.replace('"', '\\"').replace("'", "\\'")
 
+
+def refresh_prompt():
+    import re
+    header = SDK / 'components/muse/muse_chat_priv.h'
+    text = header.read_text()
+    pattern = re.compile(r'(#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD \\\n    "\{\\"message\\":\\")(.*?)(\\",\\"output_modality)', re.S)
+    match = pattern.search(text)
+    if match and match.group(2) != escaped_bunty_prompt:
+        header.write_text(text[:match.start(2)] + escaped_bunty_prompt + text[match.end(2):])
+
 if '#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
     replace('components/muse/muse_chat_priv.h', '#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\"," \\\n    "\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""',
             '#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"' + escaped_bunty_prompt + '\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\",\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#else\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\"," \\\n    "\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#endif')
 
 
+refresh_prompt()
 replace('components/muse/muse_chat_priv.h', '#include "muse_chat.h"',
         '#ifdef ESP_PLATFORM\n#include "sdkconfig.h"\n#endif\n#include "muse_chat.h"')
 

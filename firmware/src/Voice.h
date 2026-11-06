@@ -19,6 +19,8 @@ class Voice {
   bool gatewayAvailable() const;
   // Waiting: exit. Recording: send. Reaction: interrupt and listen again.
   void toggle() { toggleRequested_ = true; }
+  // Opens a conversation whose first turn is patient: see cfg::wake::kSilenceEndMs.
+  void startFromWake() { wakeTurn_ = true; toggleRequested_ = true; }
   void end() { endRequested_ = true; }
   Phase phase() const { return phase_; }
   bool speechDetected() const { return detected_; }
@@ -33,6 +35,9 @@ class Voice {
   bool takePicture(const uint8_t *&, size_t &) { return false; }
   void releasePicture() {}
   void react(const char *replyText);
+  // Call while the head's servos are moving: their whine is not speech, so the
+  // detector ignores the microphone until a moment after they stop.
+  void noteMotion(uint32_t now) { motionUntil_ = now + 300; }
 
  private:
   static void voiceTask(void *context);
@@ -43,11 +48,14 @@ class Voice {
   Microphone *microphone_ = nullptr;
   std::atomic<bool> ready_{false};
   std::atomic<bool> toggleRequested_{false};
+  std::atomic<bool> wakeTurn_{false};
   std::atomic<bool> endRequested_{false};
   std::atomic<bool> detected_{false};
   std::atomic<Phase> phase_{Phase::Off};
+  std::atomic<uint32_t> motionUntil_{0};
   std::atomic<Emotion> emotion_{Emotion::Neutral};
   uint8_t *preRollStorage_ = nullptr;
+  int16_t *gateStorage_ = nullptr;
   int16_t *utteranceStorage_ = nullptr;
   uint32_t phaseSince_ = 0;
   uint32_t reactionUntil_ = 0;

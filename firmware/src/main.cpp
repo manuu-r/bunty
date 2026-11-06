@@ -10,6 +10,8 @@
 #include "Dance.h"
 #include "IotGatewayCredentials.h"
 #include "Voice.h"
+#include "WakeWord.h"
+#include "WakeInfo.h"
 #include "Muse.h"
 #include "MuseDisplay.h"
 #include "Shell.h"
@@ -54,6 +56,8 @@ wl_status_t lastWifiStatus = WL_NO_SHIELD;
 Microphone microphone;
 Voice voice;
 Dance dance;
+WakeWord wakeWord;
+bool wakeStarted = false;
 
 // Bunty's face owns the screen for the whole conversation.
 bool voiceFaceShown = false;
@@ -162,6 +166,7 @@ void startRuntime() {
   displayState = DisplayState::Idle;
   lastInteractionAt = millis();
   if (!microphone.available() && microphone.begin()) startVoice();
+  if (!wakeStarted && microphone.available()) wakeStarted = wakeWord.begin(&microphone);
   power::markBusy();
   lastWifiStatus = WiFi.status();
   if (!greetingEyesShown) showIdleFace();
@@ -394,9 +399,55 @@ bool serviceVoice() {
   if(event.kind==touch::Event::Kind::kLongPress)voice.end();
   else if(event.kind==touch::Event::Kind::kTap &&
           (voice.phase()==Voice::Phase::Speaking || voice.phase()==Voice::Phase::Thinking))
-    voice.toggle(); // a touch interrupts; VAD sends speech automatically
+    voice.end(); // a touch stops the conversation; only "Hey Buddy" starts one
   serviceVoiceFace(now);
   return true;
+}
+
+// "Hey Buddy": turn toward the voice, then open the conversation. The only way in.
+void onWake(const WakeEvent &heard, uint32_t now) {
+  lastInteractionAt = now;
+  power::markBusy();
+  if (displayState == DisplayState::Sleeping) wake();
+  // The mics ride on the head, so the bearing is relative to where it points now.
+  const float current = turnServoReady ? turnServo.angle() - float(turnHome) : 0.0f;
+  float yaw = 0.0f;
+  bool turning = false;
+  if (heard.bearingValid && fabsf(heard.bearingDegrees) >= cfg::wake::kTurnDeadbandDegrees) {
+    yaw = fmaxf(-cfg::wake::kMaxTurnDegrees,
+                fminf(cfg::wake::kMaxTurnDegrees, current + heard.bearingDegrees * cfg::wake::kRightIsPositiveYaw));
+    turning = true;
+  }
+  logPrintf("[wake] head at %+.0f deg; %s\n", current,
+            turning ? "turning toward the voice" : "bearing unusable or ahead; not turning");
+  wakeInfo::Record record;
+  record.atMs = now;
+  record.bearingValid = heard.bearingValid;
+  record.bearingRight = heard.bearingDegrees;
+  record.confidence = heard.confidence;
+  record.turned = turning;
+  record.lookYaw = turning ? yaw : current;
+  if (cfg::wake::kStartConversation && voice.ready() && !voice.active()) {
+    record.conversationStarted = true;
+    shell::hide();
+    // The conversation owns the head, so the turn is held by Dance, not queued.
+    dance.setBearing(turning ? yaw : 0.0f, now);
+    voice.startFromWake();
+  } else if (turning) {
+    // No conversation will open: turn on its own, as bunty.look would.
+    muse::lookAt(yaw, 0.0f, speechGesture::rate(speechGesture::Speed::Fast));
+  }
+  wakeInfo::record(record);
+}
+
+void serviceWake() {
+  const uint32_t now = millis();
+  // The head's own servos are loud next to its microphones.
+  if (turnServo.moving() || tiltServo.moving()) voice.noteMotion(now);
+  // Listen only while nothing else uses the microphone.
+  wakeWord.setArmed(wakeWord.available() && !voice.active() && !muse::setupActive());
+  WakeEvent heard;
+  if (wakeWord.take(heard)) onWake(heard, now);
 }
 
 void serviceRuntime() {
@@ -416,7 +467,7 @@ void serviceRuntime() {
     if(event.kind==touch::Event::Kind::kTap) {
       const bool spoken=muse::speechPictureActive();
       muse::tapDisplay();
-      if(spoken)voice.toggle(); // the picture is part of the reply being interrupted
+      if(spoken)voice.end(); // the picture is part of the reply being interrupted
     } else if(event.kind==touch::Event::Kind::kLongPress) {
       if(voice.active())voice.end();
       else {muse::dismissDisplay();openSettings();}
@@ -452,10 +503,7 @@ void serviceRuntime() {
     ui::fadeBacklightTo(dimmed && event.kind==touch::Event::Kind::kNone &&
                         now-shell::activityAt()>=cfg::ui::kIdleSleepMs?cfg::ui::kSleepBacklightDuty:255);
     const auto action=shell::service(event,muse::connected(),voice.phase()==Voice::Phase::Speaking,now);
-    if(action==shell::Action::Talk) {
-      if(voice.ready()) {shell::hide();if(!voice.active())voice.toggle();}
-      else showNotice(muse::wifiConnected() ? "Connecting to voice" : "Wi-Fi connecting", 1200);
-    } else if(action==shell::Action::Face) {
+    if(action==shell::Action::Face) {
       shell::showFace();shell::takeFaceRequest();showIdleFace();
     } else if(action==shell::Action::Settings) {
       if(voice.active())voice.end();else openSettings();
@@ -478,11 +526,6 @@ void serviceRuntime() {
     }
     if(cfg::ui::kTextContent && event.kind==touch::Event::Kind::kTap && ui::settingsControlAt(event.x,event.y)) {
       shell::showHome();return;
-    }
-    if(event.kind==touch::Event::Kind::kTap) {
-      if(voice.ready())voice.toggle();
-      else showNotice(muse::wifiConnected() ? "Connecting to voice" : "Wi-Fi connecting", 1200);
-      return;
     }
     if(event.kind==touch::Event::Kind::kLongPress) {openSettings();return;}
   } else if (serviceFace()) {
@@ -741,6 +784,7 @@ void loop() {
       startRuntime();
     }
   } else if (runtimeStarted) {
+    serviceWake();
     serviceRuntime();
   }
 

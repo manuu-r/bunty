@@ -59,7 +59,7 @@ int main() {
   nav.forward(120);nav.forward(240);nav.back();assert(nav.textPage==120);nav.back();assert(!nav.textPage);
   nav.forward(100);nav.forward(0);assert(!nav.textPage && !nav.depth);
   assert(shell::tap(*model,nav,110,299,0)==shell::Action::Redraw && nav.selected==-1);
-  assert(shell::tap(*model,nav,180,299,0)==shell::Action::Talk);
+  assert(shell::tap(*model,nav,180,299,0)==shell::Action::Face); // the old mic corner is just Home now
   assert(shell::tap(*model,nav,239,0,0)==shell::Action::Face);
   assert(shell::tap(*model,nav,-1,0,0)==shell::Action::None);
   nav.open(shell::View::Apps);shell::tap(*model,nav,160,205,0);assert(nav.view==shell::View::Apps); // unloaded card is absent

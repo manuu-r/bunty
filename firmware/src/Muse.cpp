@@ -7,6 +7,7 @@
 #include "MuseText.h"
 #include "Shell.h"
 #include "SpeechGesture.h"
+#include "WakeInfo.h"
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include "Ui.h"
@@ -38,7 +39,8 @@ std::atomic<led_state_t> linkState{LED_STATE_BOOT};
 std::atomic<bool> appStarted{false};
 std::atomic<button_cb> shortPress{nullptr};
 std::atomic<bool> setupActive_{false};
-struct Motion { float yaw, pitch; };
+// rate 0 keeps the servo's own calibrated glide speed.
+struct Motion { float yaw, pitch, rate; };
 QueueHandle_t motionQueue = nullptr;
 portMUX_TYPE captionLock = portMUX_INITIALIZER_UNLOCKED;
 char captionText[1024] = {};
@@ -108,28 +110,29 @@ bool getProgress(char *status, size_t size, int &percent) {
 }
 void service(ServoMotion *yaw,ServoMotion *pitch,float yawHome,float pitchHome,bool conversationActive) {
   static Motion motion={};
+  static float yawBase=0,pitchBase=0;  // calibrated speeds, restored after a speed override
   static int stage=0;
   // The conversation controller owns both axes until it has homed. Keep
   // manual requests queued and release any preempted single-axis reservation.
   if(conversationActive) {
-    if(stage==1) power::release(power::Load::kTurnServo);
-    if(stage==3) power::release(power::Load::kTiltServo);
+    if(stage==1) {power::release(power::Load::kTurnServo);if(yawBase>0&&yaw)yaw->setSpeed(yawBase);}
+    if(stage==3) {power::release(power::Load::kTiltServo);if(pitchBase>0&&pitch)pitch->setSpeed(pitchBase);}
     if(stage==1 || stage==3 || stage==2) stage=4;
     return;
   }
-  if(stage==1 && yaw && !yaw->moving()) { power::release(power::Load::kTurnServo); stage=2; }
-  if(stage==3 && pitch && !pitch->moving()) { power::release(power::Load::kTiltServo); stage=0; }
+  if(stage==1 && yaw && !yaw->moving()) { power::release(power::Load::kTurnServo); if(yawBase>0)yaw->setSpeed(yawBase); stage=2; }
+  if(stage==3 && pitch && !pitch->moving()) { power::release(power::Load::kTiltServo); if(pitchBase>0)pitch->setSpeed(pitchBase); stage=0; }
   if(stage==0 && motionQueue && xQueueReceive(motionQueue,&motion,0)==pdTRUE) stage=4;
   if(stage==4) {
     if(!yaw) stage=2;
     else if(power::claim(power::Load::kTurnServo)) {
-      power::markBusy(); yaw->moveTo(yawHome+motion.yaw); stage=1;
+      power::markBusy(); yawBase=motion.rate>0?yaw->speed():0; if(motion.rate>0)yaw->setSpeed(power::servoSpeed(motion.rate)); yaw->moveTo(yawHome+motion.yaw); stage=1;
     }
   }
   if(stage==2) {
     if(!pitch) stage=0;
     else if(power::claim(power::Load::kTiltServo)) {
-      power::markBusy(); pitch->moveTo(pitchHome+motion.pitch); stage=3;
+      power::markBusy(); pitchBase=motion.rate>0?pitch->speed():0; if(motion.rate>0)pitch->setSpeed(power::servoSpeed(motion.rate)); pitch->moveTo(pitchHome+motion.pitch); stage=3;
     }
   }
 }
@@ -147,6 +150,11 @@ bool begin() {
   return true;
 }
 bool setupActive() { return setupActive_; }
+bool lookAt(float yawDegrees,float pitchDegrees,float rate) {
+  if(!motionQueue||!isfinite(yawDegrees)||!isfinite(pitchDegrees))return false;
+  Motion motion{yawDegrees,pitchDegrees,rate};
+  return xQueueOverwrite(motionQueue,&motion)==pdTRUE;
+}
 bool serviceSetup() {
   static led_state_t shown=LED_STATE_BOOT;
   led_state_t state=linkState;
@@ -191,6 +199,38 @@ bool muse_link_req_send(int64_t id,const void *data,size_t len,bool end,int wait
 void muse_link_req_cancel(int64_t id) { noise_ctrl_req_cancel(id); }
 void muse_state_page(bool,int *cols,int *lines) { *cols=26; *lines=2; }
 muse_power_t muse_state_power() { return {-1,0,false,false}; } // No battery telemetry hardware.
+extern "C++" {
+// Gesture angles stay inside the small-arc power reservation Dance enforces.
+constexpr const char *kAngleDescription[]={
+  "Optional peak yaw in degrees from home, -18 to 18 (positive is right, as in bunty.look). Replaces the gesture's own yaw swing; with gesture neutral it looks to this angle, holds, then returns.",
+  "Optional peak pitch in degrees from home, -15 to 15 (positive is up, as in bunty.look). Replaces the gesture's own pitch swing; with gesture neutral it looks to this angle, holds, then returns."};
+void addAngleParams(cJSON *options) {
+  const char *names[]={"yaw","pitch"};
+  for(int i=0;i<2;++i) {
+    cJSON *param=cJSON_AddObjectToObject(options,names[i]);
+    cJSON_AddStringToObject(param,"type","number");
+    cJSON_AddStringToObject(param,"description",kAngleDescription[i]);
+  }
+}
+// Reads optional yaw/pitch. Out-of-range values are refused, never clipped, so
+// Muse learns the limit instead of getting a smaller motion than it asked for.
+bool parseAngles(cJSON *params,speechGesture::Angles &out,const char *&error) {
+  out={};
+  const struct {const char *key;float limit;bool yaw;} axes[]={{"yaw",cfg::dance::kMaxYawDegrees,true},{"pitch",cfg::dance::kMaxTiltDegrees,false}};
+  for(const auto &axis:axes) {
+    cJSON *item=cJSON_GetObjectItem(params,axis.key);
+    if(!item)continue;
+    if(!cJSON_IsNumber(item)||!isfinite(item->valuedouble)||fabs(item->valuedouble)>axis.limit) {
+      error=axis.yaw?"yaw must be a number from -18 to 18 degrees":"pitch must be a number from -15 to 15 degrees";
+      return false;
+    }
+    const int8_t degrees=int8_t(lround(item->valuedouble));
+    if(axis.yaw){out.yaw=degrees;out.hasYaw=true;}
+    else {out.pitch=degrees;out.hasPitch=true;}
+  }
+  return true;
+}
+}
 void bunty_muse_register(cJSON *commands) {
   if(cfg::ui::kTextContent)shell::registerCommands(commands);
   // Override the generic LED-board description with Bunty's actual geometry.
@@ -221,11 +261,12 @@ void bunty_muse_register(cJSON *commands) {
   }
   if(draw) {
     cJSON *options=cJSON_GetObjectItem(draw,"optional");
+    addAngleParams(options);
     for(const char *name:{"gesture","speed"}) {
       cJSON *param=cJSON_AddObjectToObject(options,name);
       cJSON_AddStringToObject(param,"type","string");
       cJSON_AddStringToObject(param,"description",!strcmp(name,"gesture")?
-        "Optional meme reaction: neutral, nod, shake, curious or happy. Starts when the image is displayed, including silent GIFs.":
+        "Optional meme reaction: neutral, nod, shake, curious or happy. Starts when the image is displayed, including silent GIFs. yaw/pitch angles, if given, set its swing.":
         "Movement tempo: fast (default, 1300 ms), normal (1800 ms) or slow (2400 ms). Match the meme; use fast for energetic reactions.");
     }
   }
@@ -243,6 +284,7 @@ void bunty_muse_register(cJSON *commands) {
   cJSON *gifRow=cJSON_AddObjectToObject(cJSON_AddObjectToObject(gifShow,"optional"),"row");
   cJSON_AddStringToObject(gifRow,"type","number");
   cJSON_AddStringToObject(gifRow,"description","Omit or -1 for fullscreen zoom. Integer 0 to 319 uses native size at that row.");
+  addAngleParams(cJSON_GetObjectItem(gifShow,"optional"));
   for(const char *name:{"gesture","speed"}) {
     cJSON *param=cJSON_AddObjectToObject(cJSON_GetObjectItem(gifShow,"optional"),name);
     cJSON_AddStringToObject(param,"type","string");
@@ -307,6 +349,16 @@ void bunty_muse_register(cJSON *commands) {
   cJSON *info=cJSON_CreateObject();
   cJSON_AddStringToObject(info,"description","Read Bunty's screen dimensions, supported image/text formats, download state, previous reset reason and free memory. No reboot or hardware changes.");
   cJSON_AddItemToObject(commands,"display.info",info);
+  cJSON *lastWake=cJSON_CreateObject();
+  cJSON_AddStringToObject(lastWake,"description",
+    "Where the most recent \"Hey Buddy\" came from, measured by Bunty's two microphones. "
+    "Returns heard (false until the first wake), age_ms since it, direction (left, right, ahead or unknown, "
+    "from Bunty's point of view), bearing_degrees (positive is Bunty's right, only when the direction is trusted; "
+    "roughly +/-10 degrees, front and back cannot be told apart), confidence 0-1, whether Bunty turned toward the voice, "
+    "look_yaw_degrees (Bunty's head offset from home in bunty.look's yaw units, so bunty.look can return to it), "
+    "and whether a conversation was opened. Read-only; moves nothing. Call it when where the user is matters, "
+    "for example to look back at them after glancing away.");
+  cJSON_AddItemToObject(commands,"bunty.last_wake",lastWake);
   cJSON *gesture=cJSON_AddObjectToObject(commands,"bunty.gesture");
   cJSON_AddStringToObject(gesture,"description",
     "One head gesture: neutral, nod, shake, curious or happy. Not needed for spoken replies, whose "
@@ -317,11 +369,13 @@ void bunty_muse_register(cJSON *commands) {
     "Media uses clear held poses up to 18 degrees yaw and 15 pitch, fast 1300 ms, normal 1800 ms, slow 2400 ms. "
     "Speech remains gentle, fast 900 ms, normal 1400 ms, slow 2000 ms; device controls power/rate. "
     "Speech requests expire after 20 seconds; display requests after 90 seconds. "
-    "Use neutral for stillness; keep movement markup out of spoken text.");
+    "Use neutral for stillness; keep movement markup out of spoken text. "
+    "Optional yaw/pitch angles set how far the head swings, still timed by gesture and speed; neutral with an angle looks there, holds, then returns.");
   cJSON *gestureParam=cJSON_AddObjectToObject(cJSON_AddObjectToObject(gesture,"required"),"gesture");
   cJSON_AddStringToObject(gestureParam,"type","string");
   cJSON_AddStringToObject(gestureParam,"description","One of: neutral, nod, shake, curious, happy.");
   cJSON *gestureOptions=cJSON_AddObjectToObject(gesture,"optional");
+  addAngleParams(gestureOptions);
   for(const char *name:{"speed","when"}) {
     cJSON *param=cJSON_AddObjectToObject(gestureOptions,name);
     cJSON_AddStringToObject(param,"type","string");
@@ -330,14 +384,18 @@ void bunty_muse_register(cJSON *commands) {
       "auto (default): next speech/image, or immediately on current image; speech: next spoken reply; display: next displayed image; now: immediately, including silence.");
   }
   cJSON *look=cJSON_CreateObject();
-  cJSON_AddStringToObject(look,"description","Turn Bunty's head while idle (queued until the conversation has finished). For voice replies use bunty.gesture. Relative yaw and pitch degrees are each -40 to 40; zero homes the head. Returns after queuing a smooth movement.");
+  cJSON_AddStringToObject(look,"description","Turn Bunty's head while idle (queued until the conversation has finished). For voice replies use bunty.gesture. Relative yaw and pitch degrees are each -40 to 40; zero homes the head. Optional speed: slow (35 deg/s), normal (50) or fast (60); default is the servo's calibrated glide. Returns after queuing a smooth movement.");
   cJSON *required=cJSON_CreateObject();
   for(const char *name:{"yaw","pitch"}) {
     cJSON *param=cJSON_CreateObject(); cJSON_AddStringToObject(param,"type","number");
     cJSON_AddStringToObject(param,"description","Degrees relative to home, -40 to 40.");
     cJSON_AddItemToObject(required,name,param);
   }
-  cJSON_AddItemToObject(look,"required",required); cJSON_AddItemToObject(look,"optional",cJSON_CreateObject());
+  cJSON *lookOptional=cJSON_CreateObject();
+  cJSON *lookSpeed=cJSON_AddObjectToObject(lookOptional,"speed");
+  cJSON_AddStringToObject(lookSpeed,"type","string");
+  cJSON_AddStringToObject(lookSpeed,"description","slow, normal or fast glide rate for this move.");
+  cJSON_AddItemToObject(look,"required",required); cJSON_AddItemToObject(look,"optional",lookOptional);
   cJSON_AddItemToObject(commands,"bunty.look",look);
 
   cJSON *react=cJSON_AddObjectToObject(commands,"bunty.react");
@@ -346,12 +404,15 @@ void bunty_muse_register(cJSON *commands) {
     "Provide emotion (face eyes: happy, curious, sassy, soft, sad, excited, angry, neutral), "
     "gesture (servos: nod, shake, puppytilt, shimmy, bashful, happy, curious, neutral), "
     "speed (fast, normal, slow), text (short 1-to-3 word punchy message, e.g. 'ALL DONE', 'ON IT', 'LOOK UP', 'YES!'), "
-    "and optional emoji ('🎉', '❤️', '👍', '👀', '⚡', '🤖', '🔥', '✨').");
+    "and optional emoji ('🎉', '❤️', '👍', '👀', '⚡', '🤖', '🔥', '✨'). "
+    "Optional yaw/pitch angles set how far the head swings (replacing the gesture's own swing, timed by speed); "
+    "angles alone look there, hold, then return.");
   cJSON *reactOptions=cJSON_AddObjectToObject(react,"optional");
   for(const char *paramName:{"emotion","gesture","speed","text","emoji"}) {
     cJSON *param=cJSON_AddObjectToObject(reactOptions,paramName);
     cJSON_AddStringToObject(param,"type","string");
   }
+  addAngleParams(reactOptions);
 
   cJSON *progress=cJSON_AddObjectToObject(commands,"bunty.progress");
   cJSON_AddStringToObject(progress,"description",
@@ -369,6 +430,9 @@ void bunty_muse_register(cJSON *commands) {
   cJSON_AddStringToObject(progDone,"type","boolean");
   cJSON_AddStringToObject(progDone,"description","True when task finishes to clear progress indicator.");
 }
+// The Muse SDK only carries these two ints from request to display, so the
+// optional angles ride in the upper bits of `speed`: bits 0-1 tempo, 8-15 yaw,
+// 16-23 pitch (signed degrees), 24-25 which of the two were given.
 bool bunty_muse_parse_image_gesture(cJSON *params,int *kind,int *speed) {
   *kind=-1;*speed=int(speechGesture::Speed::Fast);
   cJSON *gesture=cJSON_GetObjectItem(params,"gesture"),*tempo=cJSON_GetObjectItem(params,"speed");
@@ -378,13 +442,18 @@ bool bunty_muse_parse_image_gesture(cJSON *params,int *kind,int *speed) {
     *kind=int(selected);
   }
   if(tempo&&(!cJSON_IsString(tempo)||!speechGesture::parseSpeed(tempo->valuestring,pace)))return false;
-  *speed=int(pace);return true;
+  speechGesture::Angles angles;const char *angleError="";
+  if(!parseAngles(params,angles,angleError))return false;
+  if(angles.any()&&*kind<0)*kind=int(speechGesture::Kind::Neutral);
+  *speed=int(pace)|int(angles.pack()<<8);return true;
 }
-void bunty_muse_image_gesture(int kind,int speed) {
+void bunty_muse_image_gesture(int kind,int packedSpeed) {
   if(kind<0) {logPrintf("[motion] no reaction attached to image\n");return;}
-  if(kind<0||kind>int(speechGesture::Kind::Bashful)||speed<0||speed>int(speechGesture::Speed::Fast)||!muse::displayActive()||muse::imageFetching())return;
+  const int speed=packedSpeed&3;
+  const auto angles=speechGesture::Angles::unpack(uint32_t(packedSpeed)>>8);
+  if(kind>int(speechGesture::Kind::Bashful)||speed>int(speechGesture::Speed::Fast)||!muse::displayActive()||muse::imageFetching())return;
   speechGesture::clearSpeech();
-  speechGesture::requestVisual(static_cast<speechGesture::Kind>(kind),millis(),static_cast<speechGesture::Speed>(speed));
+  speechGesture::requestVisual(static_cast<speechGesture::Kind>(kind),millis(),static_cast<speechGesture::Speed>(speed),angles);
 }
 cJSON *bunty_muse_command(const char *name,cJSON *params) {
   if(!cfg::ui::kTextContent&&(!strncmp(name,"ui.",3)||!strcmp(name,"display.show_text")))
@@ -397,7 +466,7 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
        row->valuedouble>319||floor(row->valuedouble)!=row->valuedouble))
       return result(false,"row must be an integer from -1 to 319");
     int gesture=-1,speed=2;
-    if(!bunty_muse_parse_image_gesture(params,&gesture,&speed))return result(false,"Invalid gesture or speed");
+    if(!bunty_muse_parse_image_gesture(params,&gesture,&speed))return result(false,"Invalid gesture, speed, yaw (-18 to 18) or pitch (-15 to 15)");
     const char *error=muse::showGifBase64(data->valuestring,row?int(row->valuedouble):-1);
     if(error)return result(false,error,"display_failed");
     bunty_muse_image_gesture(gesture,speed);
@@ -489,11 +558,13 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
     if(tempo&&(!cJSON_IsString(tempo)||!speechGesture::parseSpeed(tempo->valuestring,speed)))
       return result(false,"speed must be fast, normal or slow");
     if(when&&!cJSON_IsString(when))return result(false,"when must be auto, speech, display or now");
+    speechGesture::Angles angles;const char *angleError="";
+    if(!parseAngles(params,angles,angleError))return result(false,angleError);
     const char *trigger=when?when->valuestring:"auto";
     const uint32_t now=millis();
-    if(!strcmp(trigger,"display"))speechGesture::requestDisplay(kind,now,speed);
-    else if(!strcmp(trigger,"now")||(!strcmp(trigger,"auto")&&muse::displayActive()&&!muse::imageFetching()))speechGesture::requestVisual(kind,now,speed);
-    else if(!strcmp(trigger,"speech")||!strcmp(trigger,"auto"))speechGesture::request(kind,now,speed,strcmp(trigger,"speech")!=0);
+    if(!strcmp(trigger,"display"))speechGesture::requestDisplay(kind,now,speed,angles);
+    else if(!strcmp(trigger,"now")||(!strcmp(trigger,"auto")&&muse::displayActive()&&!muse::imageFetching()))speechGesture::requestVisual(kind,now,speed,angles);
+    else if(!strcmp(trigger,"speech")||!strcmp(trigger,"auto"))speechGesture::request(kind,now,speed,strcmp(trigger,"speech")!=0,angles);
     else return result(false,"when must be auto, speech, display or now");
     return result(true);
   }
@@ -525,6 +596,10 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
         return result(false,"speed must be fast, normal or slow");
     }
 
+    speechGesture::Angles angles;const char *angleError="";
+    if(!parseAngles(params,angles,angleError))return result(false,angleError);
+    if(angles.any()&&!hasGesture&&!hasEmotion) {hasGesture=true;gesture=speechGesture::Kind::Neutral;}
+
     char replyBuf[64]={};
     if(txt&&cJSON_IsString(txt)) {
       strlcpy(replyBuf,txt->valuestring,sizeof(replyBuf));
@@ -550,7 +625,7 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
 
     if(hasGesture) {
       speechGesture::clearSpeech();
-      speechGesture::requestVisual(gesture,millis(),speed);
+      speechGesture::requestVisual(gesture,millis(),speed,angles);
     }
 
     char turnText[128]={};
@@ -583,11 +658,32 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
     bunty_muse_agent_busy(true);
     return result(true);
   }
+  if(!strcmp(name,"bunty.last_wake")) {
+    const auto wake=wakeInfo::last();
+    cJSON *r=result(true),*payload=cJSON_GetObjectItem(r,"payload");
+    cJSON_AddBoolToObject(payload,"heard",wake.sequence!=0);
+    if(!wake.sequence)return r;
+    cJSON_AddNumberToObject(payload,"sequence",wake.sequence);
+    cJSON_AddNumberToObject(payload,"age_ms",double(millis()-wake.atMs));
+    cJSON_AddStringToObject(payload,"direction",wakeInfo::direction(wake,cfg::wake::kTurnDeadbandDegrees));
+    if(wake.bearingValid) cJSON_AddNumberToObject(payload,"bearing_degrees",std::round(wake.bearingRight));
+    cJSON_AddNumberToObject(payload,"confidence",std::round(wake.confidence*100.0)/100.0);
+    cJSON_AddBoolToObject(payload,"turned_toward_voice",wake.turned);
+    cJSON_AddNumberToObject(payload,"look_yaw_degrees",std::round(wake.lookYaw));
+    cJSON_AddBoolToObject(payload,"conversation_started",wake.conversationStarted);
+    return r;
+  }
   if(strcmp(name,"bunty.look")) return result(false,"Unknown Bunty command");
   cJSON *yaw=cJSON_GetObjectItem(params,"yaw"), *pitch=cJSON_GetObjectItem(params,"pitch");
   if(!cJSON_IsNumber(yaw)||!cJSON_IsNumber(pitch)||!isfinite(yaw->valuedouble)||!isfinite(pitch->valuedouble)||fabs(yaw->valuedouble)>40||fabs(pitch->valuedouble)>40)
     return result(false,"yaw and pitch must be numbers between -40 and 40");
-  Motion motion{static_cast<float>(yaw->valuedouble),static_cast<float>(pitch->valuedouble)};
+  float rate=0;
+  if(cJSON *tempo=cJSON_GetObjectItem(params,"speed")) {
+    speechGesture::Speed pace;
+    if(!cJSON_IsString(tempo)||!speechGesture::parseSpeed(tempo->valuestring,pace))return result(false,"speed must be fast, normal or slow");
+    rate=speechGesture::rate(pace);
+  }
+  Motion motion{static_cast<float>(yaw->valuedouble),static_cast<float>(pitch->valuedouble),rate};
   if(!motionQueue||xQueueOverwrite(motionQueue,&motion)!=pdTRUE) return result(false,"Motion unavailable");
   return result(true);
 }

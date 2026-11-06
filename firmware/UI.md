@@ -4,7 +4,7 @@
 > Everything below is withheld from Muse, and the Recent handle is hidden. Muse
 > says this information aloud instead. Setting the flag to true restores it all.
 
-The animated face is the default home. Tap the face to start voice. Tap the
+The animated face is the default home. Say "Hey Buddy" to start voice; tapping the face does nothing. Tap the
 small bottom handle to open Recent; it contains only previously requested
 Agenda, Tasks, Notes and Info views. No clock dashboard, empty app tiles,
 summary cards or automatic data fetches appear at startup. A long press opens

@@ -31,6 +31,9 @@ void Dance::attach(ServoMotion *turn, uint8_t turnHome, ServoMotion *tilt,
 void Dance::aim(float turnOffset, float tiltOffset, float degreesPerSecond) {
   // Conversation movements share the small-arc Dance power reservation.
   turnOffset=fmaxf(-kMaxYawDegrees,fminf(kMaxYawDegrees,turnOffset));
+  // The pose's own swing stays inside the small-arc reservation; a held bearing
+  // shifts the whole pose, up to the head's turn limit.
+  turnOffset=fmaxf(-cfg::wake::kMaxTurnDegrees,fminf(cfg::wake::kMaxTurnDegrees,turnOffset+bearing_.load()));
   tiltOffset=fmaxf(-kMaxTiltDegrees,fminf(kMaxTiltDegrees,tiltOffset));
   const float rate = power::servoSpeed(fminf(kMaxDegreesPerSecond,degreesPerSecond));
   if (turn_) turn_->follow(turnHome_ + turnOffset, rate);
@@ -43,6 +46,8 @@ void Dance::service(const Voice &voice, uint32_t now) {
   if (now - lastTickAt_ < kTickMs) return;
   const float dt = lastTickAt_ == 0 ? kTickMs / 1000.0f : (now - lastTickAt_) / 1000.0f;
   lastTickAt_ = now;
+  // A bearing set for a conversation that never opened must not linger.
+  if (!claimed_ && bearing_.load() != 0.0f && now - bearingAt_.load() > 3000) bearing_ = 0.0f;
 
   if(visualGesture_&&visualGeneration_!=speechGesture::cancelGeneration.load())
     gesturing_=visualGesture_=false;
@@ -54,8 +59,9 @@ void Dance::service(const Voice &voice, uint32_t now) {
   if(claimed_&&speechGesture::takeVisual(gesture_,now)) {
     gesturing_=visualGesture_=true;gestureSince_=now;homing_=false;
     visualGeneration_=generation;
-    logPrintf("[motion] meme=%s speed=%u duration=%u ms turn=%u tilt=%u power=%s\n",
+    logPrintf("[motion] meme=%s speed=%u yaw=%d pitch=%d duration=%u ms turn=%u tilt=%u power=%s\n",
       speechGesture::name(gesture_.kind),unsigned(gesture_.speed),
+      gesture_.angles.hasYaw?gesture_.angles.yaw:0,gesture_.angles.hasPitch?gesture_.angles.pitch:0,
       unsigned(speechGesture::visualDuration(gesture_.speed)),unsigned(turn_!=nullptr),unsigned(tilt_!=nullptr),power::modeName());
   }
   if(visualGesture_&&visualGeneration_!=speechGesture::cancelGeneration.load())
@@ -63,7 +69,7 @@ void Dance::service(const Voice &voice, uint32_t now) {
   // A media gesture owns both axes even during Listening, Thinking or silence.
   if(visualGesture_&&gesturing_) {
     const uint32_t elapsed=now-gestureSince_;
-    const auto pose=speechGesture::visualPose(gesture_.kind,elapsed,gesture_.speed);
+    const auto pose=speechGesture::visualPose(gesture_,elapsed);
     aim(pose.yaw,pose.pitch,speechGesture::rate(gesture_.speed));power::markBusy();
     if(elapsed>=speechGesture::visualDuration(gesture_.speed))gesturing_=visualGesture_=false;
     return;
@@ -72,6 +78,7 @@ void Dance::service(const Voice &voice, uint32_t now) {
   if (phase == Voice::Phase::Off) {
     if (!claimed_) return;
     if (!homing_) {
+      bearing_ = 0.0f;
       homing_ = true;
       homingSince_ = now;
       aim(0.0f, 0.0f, kPoseDegreesPerSecond);
@@ -107,7 +114,7 @@ void Dance::service(const Voice &voice, uint32_t now) {
   if(speechGesture::take(gesture_,now)) {gesturing_=true;gestureSince_=now;}
   if(gesturing_) {
     const uint32_t elapsed=now-gestureSince_;
-    const auto pose=speechGesture::pose(gesture_.kind,elapsed,gesture_.speed);
+    const auto pose=speechGesture::pose(gesture_,elapsed);
     aim(pose.yaw,pose.pitch,speechGesture::rate(gesture_.speed));
     if(elapsed>=speechGesture::duration(gesture_.speed)) gesturing_=false;
     return;

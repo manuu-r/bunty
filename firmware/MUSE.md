@@ -32,16 +32,19 @@ No eFuses, NVS encryption, Secure Boot, tunnel, or OTA are enabled by this port.
 2. Add the device named `MuseGadget-Bunty-...`.
 3. When Bunty shows its confirmation screen, tap Yes.
 4. Complete Wi-Fi/account provisioning in the phone app.
-5. Tap Bunty's mic control once to start a conversation. Local energy VAD detects
+5. Say "Hey Buddy" to start a conversation (there is no tap-to-talk). Local energy VAD detects
    speech, preserves 320 ms of opening audio, and sends after a 660 ms pause.
    Utterances are capped at 30 seconds; quiet waiting opens no Muse request.
 6. Muse transcribes the utterance and sends its reply. Captions page on the LCD;
    the gateway's Aura TTS speaks each completed message. Listening resumes after
-   the reply automatically. Eight seconds without speech exits the conversation.
-   Tap while waiting to exit, during speech to send immediately, or during playback
-   to interrupt and listen again.
+   the reply automatically. The turn opened by "Hey Buddy" waits longer: it sends 4 s after
+   you stop speaking and, if you say nothing for 4 s, ends without sending anything
+   (`cfg::wake::kSilenceEndMs`). Follow-up turns use the quick 660 ms pause and have no
+   silence timeout.
+   A tap while Bunty is thinking or replying stops the conversation; a long press ends
+   it at any time.
 
-The interaction is hands-free after the initial tap, but Muse still processes
+The interaction is hands-free after the wake word, but Muse still processes
 completed utterances rather than a continuous realtime speech session. Capture
 is paused during playback: speech barge-in and acoustic echo cancellation are
 not implemented. Energy VAD adapts to quiet background levels; sustained noise
@@ -225,7 +228,7 @@ verified; see [RUNTIME.md](RUNTIME.md) for measured heap/stack headroom.
 
 Seven `ui.*` tools provide calendar/task/note snapshots, information cards,
 navigation, timezone context and state reads. The default idle home is the animated face;
-Recent contains requested content only. Tap the face to talk. Every voice upload now includes
+Recent contains requested content only. Say "Hey Buddy" to talk. Every voice upload now includes
 instructions asking Muse to open each sentence with an expression tag instead of
 calling `bunty.gesture`, which remains for silence and images. The
 device executes small named gestures through the conversation controller,
@@ -263,3 +266,95 @@ Meme reactions: `display.show_gif` and `display.draw_url` accept optional
 without waiting for speech. Fast media reaction is the default (1,300 ms); normal is 1,800 ms and
 slow is 2,400 ms. Media uses wider held poses, while voice remains gentle. Standalone `bunty.gesture` also accepts `when` (auto/speech/display/now).
 See [GIF.md](GIF.md#meme-reactions-and-tempo) for timing, cancellation and limits.
+
+Explicit angles: `bunty.gesture`, `bunty.react`, `display.show_gif` and
+`display.draw_url` also accept optional `yaw` (-18 to 18) and `pitch` (-15 to 15)
+in whole degrees (fractions are rounded). They replace the gesture's own swing
+on that axis; the gesture and `speed` still set the timing. An axis left out keeps
+the gesture's default, and `neutral` with angles means look there, hold, then
+return (a left-out axis stays home). Values outside the range are rejected rather
+than clipped: the limits are the small-arc power reservation in
+`cfg::dance`. For speech the angles scale the flowing motion's amplitude, whose
+true peak is lower than the nominal angle. `bunty.look` keeps its -40 to 40 range and
+gains an optional `speed` (slow 35, normal 50, fast 60 degrees per second); omitted,
+it uses the servo's calibrated glide. Built and host-tested; not yet run on hardware.
+
+## "Hey Buddy" wake word and turning toward the voice
+
+While nothing else is using the microphones, a listener task runs Espressif's stock
+`wn10_en_heybuddy` WakeNet model (`espressif/esp-sr`, ~0.4 MB, in the `model`
+partition at `0x670000` - the old unused `spiffs` slot, same offset and size, so NVS and
+the app are untouched). On a match Bunty wakes the screen, turns toward the voice and
+opens a conversation (`cfg::wake::kStartConversation`). It is the only way to start one:
+tapping the face or the shell no longer talks, and the shell's mic icon is gone. With the
+wake word off or its model missing, Bunty cannot be talked to.
+
+The bearing comes from the time difference between the two I2S slots (`src/Doa.h`):
+the last second of both channels is cross-correlated over the loudest blocks, with
+sub-sample interpolation, and the delay becomes an angle. The mics ride on the head,
+so the bearing is added to the head's current yaw (`main.cpp: onWake`) and held by
+`Dance::setBearing` for the whole conversation (up to +/-40 degrees); it clears when the
+head homes. If the bearing is unusable (one mic dead, a diffuse room, correlation under
+`kMinBearingConfidence`) or under `kTurnDeadbandDegrees`, Bunty listens without turning.
+
+Muse can ask where the last wake came from with the read-only tool `bunty.last_wake`
+(`heard`, `age_ms`, `direction` left/right/ahead/unknown from Bunty's point of view,
+`bearing_degrees` positive to Bunty's right and only when trusted, `confidence`,
+`turned_toward_voice`, `look_yaw_degrees` in `bunty.look`'s yaw units, `conversation_started`).
+It is not sent automatically: a voice turn is audio, so the direction cannot ride along with it.
+
+Limits to expect:
+- `kMicSpacingMeters` is 20 mm (as built). At that spacing the whole usable delay is
+  under one sample (0.93 at 16 kHz), so the delay is searched in 1/8-sample steps with a
+  windowed-sinc interpolator (`Doa.h`). With exact delays the host test is within about
+  8 degrees (worse toward the sides); real speech, reverberation and a servo next to the
+  mics will be worse. Two mics also cannot tell front from back.
+- `kRightIsPositiveYaw = -1`: a positive servo angle turns Bunty to its left on this build
+  (the first flash turned the wrong way). `kLeftSlotIsBuntyLeft` (J8 on Bunty's left) is
+  still an unchecked assumption; flipping either one mirrors the turn.
+- Listening keeps the CPU at full speed (no idle down-clock) and the mic running, which
+  costs battery. `cfg::wake::kEnabled = false` removes it entirely.
+- Nothing on this path has run on hardware: detection accuracy, false-wake rate, CPU
+  headroom and internal-RAM use are unmeasured.
+- The head's servo noise is held out of the VAD while it moves and for 300 ms after, so
+  words spoken during the ~0.7 s turn itself are not heard; pause briefly after "Hey Buddy".
+
+## What Muse is told (the turn prompt)
+
+Every voice note carries a prompt (`bunty_prompt` in `scripts/adapt_muse.py`, compiled into
+`muse_chat_priv.h`). It now says Bunty is silent and cannot see the Muse chat, so the
+answer must be delivered to Bunty itself: a short caption in the reply (about 60 characters,
+shown for a few seconds), `display.show_text` for anything longer, `ui.show_card` or the
+list tools for structured results, and `bunty.progress` with `done: true` before the result
+when a long task finishes. The script now refreshes this prompt in an already patched SDK
+(before, an edit to the text had no effect once the SDK had been patched once); keep the
+phrase "one expression tag" in it, because the later patches key off that phrase.
+
+## Noise removal and speech-only uploads
+
+Every 10 ms of microphone audio goes through Espressif's WebRTC noise suppressor
+(`ns_*`) and then its spectral speech detector (`vad_*`) in `SpeechFilter`. The energy
+VAD below still decides when a turn starts and ends; the spectral detector decides what
+is worth sending. `SpeechGate` then keeps only the frames called speech plus 120 ms either
+side (`cfg::voice::kGateEdgeMs`):
+- leading and trailing silence and room noise are never sent;
+- a long pause is squeezed to 240 ms, so the 4 s wake-turn pause costs nothing;
+- if less than 250 ms of speech was found (`kMinSpeechMs`) the turn is thrown away, nothing
+  is sent, and Bunty keeps listening (a wake turn's 4 s give-up still applies).
+
+`cfg::voice::kFilterNoise = false` sends the microphone audio untouched. `kSpeechVadMode`
+(0-4) trades dropped noise against clipped quiet speech. **None of this has been tuned or
+heard on Bunty's microphones**: if Bunty seems to ignore you, the log line
+`only N ms of speech in that noise` means the detector disagreed with the energy VAD; lower
+the mode or turn the filter off. Suppression can also colour the voice slightly, and its
+effect on Muse's transcription is unmeasured.
+
+## VAD changes
+
+`MuseVad.h` now drops steady noise (a fan, hum or servo whine that is loud for 3 s with
+under 12% level variation) as `Event::Rejected` instead of recording it until the 30 s
+cap, and raises its noise floor above it. A quiet frame now cancels twice its length of
+onset rather than the whole onset, so a gap inside a soft word no longer prevents
+detection. Audio recorded while the servos move (`Voice::noteMotion`) cannot start an
+utterance. Steady-noise rejection treats a perfectly constant level as noise, so the
+host test's 30 s cap case now uses a varying level.

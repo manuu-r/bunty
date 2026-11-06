@@ -20,6 +20,21 @@ trap 'rm -rf "$test_dir"' EXIT
   -Isrc tests/host/muse_vad_test.cpp -o "$test_dir/muse_vad_test"
 "$test_dir/muse_vad_test"
 
+# Two-microphone bearing from synthetic fractionally-delayed signals.
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Isrc tests/host/doa_test.cpp -o "$test_dir/doa_test"
+"$test_dir/doa_test"
+
+# The record behind the bunty.last_wake tool.
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Isrc tests/host/wake_info_test.cpp -o "$test_dir/wake_info_test"
+"$test_dir/wake_info_test"
+
+# Keeps speech and a margin; drops silence, noise and long pauses.
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
+  -Isrc tests/host/speech_gate_test.cpp -o "$test_dir/speech_gate_test"
+"$test_dir/speech_gate_test"
+
 # Exercise the actual cached graphics/Print adaptation, not the display stub.
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize="${BUNTY_SANITIZERS:-undefined,bounds}" -fno-sanitize-recover=all \
   -I.deps/gfx/include -Itests/host/stubs -Ilib/bunty_platform -Isrc \

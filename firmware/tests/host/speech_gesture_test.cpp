@@ -55,5 +55,20 @@ int main() {
   requestVisual(Kind::Shake,std::numeric_limits<uint32_t>::max()-10,Speed::Fast);
   assert(takeVisual(reaction,20)&&reaction.kind==Kind::Shake);
   clear();
-  puts("speech gestures: bounds, expiry, cancellation and clock wrap passed");
+  // Angles ride with their request through every mailbox, and never leak into the next one.
+  Angles want;want.yaw=-12;want.hasYaw=true;want.pitch=7;want.hasPitch=true;
+  const auto round=Angles::unpack(want.pack());
+  assert(round.yaw==-12&&round.pitch==7&&round.hasYaw&&round.hasPitch);
+  assert(!Angles::unpack(Angles{}.pack()).any());
+  requestVisual(Kind::Nod,100,Speed::Slow,want);
+  assert(takeVisual(reaction,101)&&reaction.angles.yaw==-12&&reaction.angles.pitch==7&&reaction.speed==Speed::Slow);
+  requestVisual(Kind::Nod,100);assert(takeVisual(reaction,101)&&!reaction.angles.any());
+  request(Kind::Happy,100,Speed::Fast,true,want);onDisplay(150);
+  assert(takeVisual(reaction,151)&&reaction.kind==Kind::Happy&&reaction.angles.yaw==-12&&reaction.angles.hasPitch);
+  requestDisplay(Kind::Shake,100,Speed::Normal,want);onDisplay(200);
+  assert(takeVisual(reaction,201)&&reaction.angles.pitch==7);
+  request(Kind::Curious,100,Speed::Fast,false,want);
+  assert(take(reaction,101)&&reaction.angles.yaw==-12);
+  clear();
+  puts("speech gestures: bounds, expiry, cancellation, clock wrap and angles passed");
 }

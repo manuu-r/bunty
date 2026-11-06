@@ -61,6 +61,11 @@ bool Microphone::begin() {
     ring_ = nullptr;
     return false;
   }
+  // The wake-word tap is optional: without its ring the microphone still works
+  // for conversations and setMonitoring() reports failure.
+  auto *tapStorage = static_cast<uint8_t *>(memory::external(kTapRingBytes + 1));
+  if (tapStorage) tap_ = xStreamBufferCreateStatic(kTapRingBytes + 1, sizeof(MicFrame), tapStorage, &tapControl_);
+  else Serial.println("[mic] no memory for the wake-word tap; wake word unavailable");
   available_ = true;
   if (xTaskCreatePinnedToCore(task, "mic", 4096, this, 6, nullptr, 1) != pdPASS) {
     available_ = false;
@@ -70,6 +75,9 @@ bool Microphone::begin() {
     if(ring_) vStreamBufferDelete(ring_);
     heap_caps_free(storage);
     ring_ = nullptr;
+    if (tap_) vStreamBufferDelete(tap_);
+    heap_caps_free(tapStorage);
+    tap_ = nullptr;
     return false;
   }
   Serial.println("[mic] ready");
@@ -86,6 +94,8 @@ void Microphone::task(void *context) {
       memory::sampleTask("mic");
       const uint32_t dropped = mic->dropped_.exchange(0);
       if (dropped) logPrintf("[mic] capture ring overflow, %u bytes dropped\n", unsigned(dropped));
+      const uint32_t tapDropped = mic->tapDropped_.exchange(0);
+      if (tapDropped) logPrintf("[mic] wake-word tap overflow, %u bytes dropped\n", unsigned(tapDropped));
     }
   }
 }
@@ -99,10 +109,29 @@ void Microphone::setCapturing(bool capturing) {
   }
 }
 
+bool Microphone::setMonitoring(bool monitoring) {
+  if (!monitoring) {
+    monitoring_ = false;
+    return true;
+  }
+  if (!available_ || !tap_) return false;
+  // Start from silence so stale frames cannot read as a fresh phrase.
+  monitoring_ = false;
+  xStreamBufferReset(tap_);
+  monitoring_ = true;
+  return true;
+}
+
+size_t Microphone::readMonitor(MicFrame *destination, size_t frames, uint32_t waitMs) {
+  if (!available_ || !tap_) return 0;
+  return xStreamBufferReceive(tap_, destination, frames * sizeof(MicFrame), pdMS_TO_TICKS(waitMs)) / sizeof(MicFrame);
+}
+
 void Microphone::readOnce() {
   const uint32_t session=capture_.session();
   static int32_t slots[kReadFrames * 2];
   static int16_t mono[kReadFrames];
+  static MicFrame tapFrames[kReadFrames];
   // Which capsules are actually wired, reported only when it changes.
   static int8_t reportedSlots = -1;
   const int8_t slots_ = int8_t((energyLeft_ > kBrokenSlotEnergy ? 1 : 0) |
@@ -117,7 +146,9 @@ void Microphone::readOnce() {
     vTaskDelay(pdMS_TO_TICKS(10));
     return;
   }
-  if(!capture_.current(session)) return; // drain DMA while idle, skip DSP
+  const bool capturing = capture_.current(session);
+  const bool tapping = monitoring_.load();
+  if(!capturing && !tapping) return; // drain DMA while idle, skip DSP
   const size_t frames = bytesRead / (2 * sizeof(int32_t));
   for (size_t i = 0; i < frames; ++i) {
     const int32_t left = audio::removeDc(slots[2 * i] >> cfg::audio::kMicShift, dcLeft_);
@@ -140,6 +171,16 @@ void Microphone::readOnce() {
     else mixed = (left + right) / 2;
     mono[i] = clip16(mixed);
     levelSum_ += uint64_t(int64_t(mono[i]) * mono[i]);
+    tapFrames[i] = {mono[i], clip16(left), clip16(right)};
+  }
+  // A direction needs two working capsules of similar sensitivity.
+  stereo_ = energyLeft_ <= kBrokenSlotEnergy && energyRight_ <= kBrokenSlotEnergy &&
+            energyLeft_ * kMicSlotRatio >= energyRight_ && energyRight_ * kMicSlotRatio >= energyLeft_;
+  if (tapping && frames) {
+    // Whole frames only: a partial write would shift every later channel.
+    const size_t tapBytes = frames * sizeof(MicFrame);
+    if (xStreamBufferSpacesAvailable(tap_) >= tapBytes) xStreamBufferSend(tap_, tapFrames, tapBytes, 0);
+    else tapDropped_ += tapBytes;
   }
   levelCount_ += frames;
   if (levelCount_ >= kReadFrames) {
@@ -147,7 +188,7 @@ void Microphone::readOnce() {
     levelSum_ = 0;
     levelCount_ = 0;
   }
-  if (frames == 0 || !capture_.beginWrite(session)) return;
+  if (frames == 0 || !capturing || !capture_.beginWrite(session)) return;
   const size_t bytes = frames * sizeof(int16_t);
   const size_t sent = xStreamBufferSend(ring_, mono, bytes, 0);
   capture_.endWrite();

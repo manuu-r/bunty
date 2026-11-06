@@ -24,6 +24,9 @@ class ServoMotion {
   // Glide rate for subsequent moves. A gesture that should read as deliberate
   // wants a low value; the default suits small posture corrections.
   void setSpeed(float degreesPerSecond);
+  float speed() const { return degreesPerSecond_; }
+  // Where the horn is now, in servo degrees; moves under the servo task.
+  float angle() const { return currentAngle_; }
   // Set once before begin; persistent calibration is loaded by setupServos.
   void setPulseRange(uint16_t minimum, uint16_t maximum) {
     if (!ready_ && minimum >= 500 && maximum <= 2500 && minimum < maximum) {

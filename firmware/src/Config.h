@@ -190,6 +190,8 @@ constexpr int kMicShift = 13;
 // otherwise the two mics are averaged, which lowers uncorrelated noise.
 constexpr uint32_t kMicSlotRatio = 8;
 constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow Muse uplink setup
+// Wake-word tap: 6 bytes a frame (mono, left, right), 1 s of slack.
+constexpr size_t kTapRingBytes = 6 * kSampleRate;
 
 constexpr uint8_t kVolumePercent = 100;
 constexpr int kSpeakerDmaBuffers = 4;
@@ -200,6 +202,44 @@ constexpr uint32_t kSpeakerDrainMs =
 constexpr float kLevelFullScale = 5000.0f;
 }  // namespace audio
 
+// ------------------------------------------------------------ wake word ---
+
+// "Hey Buddy" wakes Bunty from any distance the mics hear, turns its head toward
+// the talker, and opens a conversation. Detection is Espressif's stock
+// wn10_en_heybuddy model, read from the "model" partition; the direction comes
+// from the arrival-time difference between the two microphones.
+namespace wake {
+constexpr bool kEnabled = true;
+// Open the conversation as well as turning. False only turns the head.
+constexpr bool kStartConversation = true;
+// Centre-to-centre distance of the two capsules: 20 mm, as built. A wrong value
+// scales every bearing (too small turns Bunty too far, too large not far enough).
+constexpr float kMicSpacingMeters = 0.02f;
+// The left I2S slot (J8, L/R pin on GND) is the microphone on Bunty's left.
+// Set false if J8 ends up on Bunty's right.
+constexpr bool kLeftSlotIsBuntyLeft = true;
+// The microphones ride on the head, so a bearing is relative to where it points.
+// -1 because on this build a positive servo angle turns Bunty to its left (the
+// first test turned the wrong way with +1).
+constexpr float kRightIsPositiveYaw = -1.0f;
+// The head's servos are limited to this swing either side of home.
+constexpr float kMaxTurnDegrees = 40.0f;
+// Weakest accepted correlation between the two mics; below it the phrase was
+// heard but its direction was not, and Bunty listens without turning.
+constexpr float kMinBearingConfidence = 0.2f;
+// Ignore bearings smaller than this: the estimate is no better than ~10 degrees.
+constexpr float kTurnDeadbandDegrees = 8.0f;
+// The turn a wake word opens waits this long: it ends 4 s after you stop speaking, and
+// gives up (sending nothing) if you say nothing at all for 4 s. Turns that follow a
+// reply keep the quick 660 ms pause.
+constexpr uint32_t kSilenceEndMs = 4000;
+constexpr uint32_t kHistoryMs = 1000;      // audio kept for the direction estimate
+constexpr uint32_t kRefractoryMs = 2500;   // ignore a repeat this soon after a wake
+// Listening for the phrase keeps the CPU at full speed: WakeNet needs it, so the
+// idle down-clock is off while armed. Costs battery; set kEnabled false to stop.
+constexpr uint32_t kBusyRefreshMs = 1000;
+}  // namespace wake
+
 // ----------------------------------------------------------------- voice ---
 
 namespace voice {
@@ -207,6 +247,15 @@ namespace voice {
 #define IOT_GATEWAY_HOST "bunty.underdogthinkers.com"
 #endif
 constexpr char kGatewayHost[] = IOT_GATEWAY_HOST;
+// Noise suppression and a spectral speech detector clean every utterance before it
+// is sent. Only speech, plus a short natural margin, leaves the device; silence,
+// room noise and long pauses are dropped. False sends the microphone audio as heard.
+constexpr bool kFilterNoise = true;
+// WebRTC VAD aggressiveness 0-4 (vad_mode_t): higher drops more non-speech but is
+// likelier to clip quiet speech. UNTUNED on Bunty's microphones.
+constexpr int kSpeechVadMode = 1;
+constexpr uint32_t kGateEdgeMs = 120;    // natural margin kept either side of speech
+constexpr uint32_t kMinSpeechMs = 250;   // less speech than this is noise: nothing is sent
 constexpr uint32_t kFaceFrameMs = 25;
 constexpr uint32_t kInputFullScaleRms = 1500;
 }  // namespace voice

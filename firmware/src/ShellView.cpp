@@ -32,10 +32,6 @@ void chevron(Adafruit_GFX &d,int x,int y,bool forward) {
 }
 void footer(Adafruit_GFX &d,const Navigation &n) {
   small(d,n.selected>=0?"BACK":"HOME",18,295,muted);
-  // One quiet microphone target; content stays the focus.
-  d.fillRoundRect(201,282,8,14,4,ink);
-  d.drawCircleHelper(205,293,8,0x4|0x8,ink);
-  d.drawFastVLine(205,302,5,ink);d.drawFastHLine(200,307,11,ink);
 }
 void empty(Adafruit_GFX &d,const char *label,const char *hint,bool) {
   fit(d,label,16,144,208);small(d,hint,16,168);
@@ -81,7 +77,7 @@ void renderRecent(Adafruit_GFX &d,const Model *m) {
 Action tapRecent(const Model *m,Navigation &n,int x,int y) {
   if(x<0 || x>=240 || y<0 || y>=320)return Action::None;
   if(y<40)return Action::Face;
-  if(y>=276)return x>=154?Action::Talk:Action::Face;
+  if(y>=276)return Action::Face;
   if(y>=250)return Action::Settings;
   if(y>=98 && y<242) {
     const View v=recentAt(m,unsigned(y-98)/36);
@@ -142,7 +138,6 @@ Action tap(Model &m,Navigation &n,int x,int y,size_t next) {
   if(x<0 || x>=240 || y<0 || y>=320) return Action::None;
   if(y<40) {if(n.selected>=0) {n.selected=-1;n.textPage=0;n.depth=0;return Action::Redraw;}return Action::Face;}
   if(y>=276) {
-    if(x>=154) return Action::Talk;
     if(n.selected>=0) {n.selected=-1;n.textPage=0;n.depth=0;return Action::Redraw;}
     return Action::Face;
   }

@@ -5,8 +5,8 @@ thinking and speaking using the real renderer. The conversation screen contains
 only the face and border aura: no waveform, wordmark, phase title, captions or
 close/End/Send controls. Pause for 660 ms to send automatically. Listening stays
 active through silence and screen changes until a long press ends it or a
-connection/playback failure occurs. Tapping the face during a reply interrupts
-and resumes listening; taps during listening do not end/send it.
+connection/playback failure occurs. Tapping the face during a reply stops the
+conversation; taps during listening do not end/send it. Only "Hey Buddy" starts one.
 
 The border colour eases over 320 ms. Eyes and blink timing persist across
 transitions, and the mouth smoothly closes between replies. Thinking begins as
@@ -208,7 +208,7 @@ The later upload-queue stall report prompted the buffered upload change above;
 that build was also flashed with its firmware hash verified. Live spoken-turn
 verification is pending.
 
-For live verification, flash without erasing NVS, then tap Talk and speak a short
+For live verification, flash without erasing NVS, then say "Hey Buddy" and speak a short
 question. Stage logs should progress through speech detected, utterance ended,
 utterance acknowledged, transcription received, reply received, TTS HTTP 200,
 playback started and successful completion, then return to listening. Logs use

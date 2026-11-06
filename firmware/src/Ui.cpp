@@ -320,7 +320,7 @@ bool confirmRejectedAt(int16_t x, int16_t y) {
          y < kRejectTop + kConfirmHeight;
 }
 
-// The quiet handle opens requested content; the face is a full-size Talk target.
+// The quiet handle opens requested content.
 bool settingsControlAt(int16_t x,int16_t y) {return x>=72 && x<168 && y>=266;}
 void drawControls() {
   panel.fillRect(0,266,kScreenWidth,54,kBackground);

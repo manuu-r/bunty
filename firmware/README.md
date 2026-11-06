@@ -55,8 +55,8 @@ Verify on hardware in this order:
 3. Muse setup: pair from the phone app using a real SDK token. Successful fresh
    provisioning reboots once so BLE does not compete with TLS/audio for internal RAM.
 4. Motion: Muse head commands respect the saved calibration and load budget.
-5. Voice: tap once, speak, pause, hear the complete reply, then speak again.
-   Interrupt playback by tapping and verify old audio does not replay.
+5. Voice: say "Hey Buddy", speak, pause, hear the complete reply, then speak again.
+   Stop playback by tapping and verify old audio does not replay.
 6. Reboot: Muse setup, gateway credentials, and calibration remain intact.
 7. Display commands: request JPEG, RGB565 and animated GIF images, paged text, cancellation,
    a failing URL, and restoration of the face during/after a voice conversation.
@@ -98,11 +98,12 @@ then configure Wi-Fi/account access in the Muse app. Muse owns Wi-Fi and NimBLE;
 there is no Gauge provisioning, discovery, dashboard fetch/cache, or reconnect
 worker. Bunty displays its animated face while idle.
 
-Tap the microphone control to enter conversation mode. Local energy VAD opens
+Say "Hey Buddy" to enter conversation mode. Local energy VAD opens
 an utterance after speech begins, preserves 320 ms of audio, and sends after a
 660 ms pause. Muse returns text; the gateway's `/v1/tts` route streams speech.
-Capture pauses during playback, then listening resumes automatically. Eight
-seconds of silence exits. See [MUSE.md](MUSE.md) for limits and tap behavior.
+Capture pauses during playback, then listening resumes automatically. The turn a
+"Hey Buddy" opens waits 4 s of silence before sending, and ends unsent after 4 s of
+nothing. See [MUSE.md](MUSE.md) for limits and wake-word behavior.
 
 Touch Settings at bottom-left or long-press to open settings. Disconnect and
 unpair have local confirmation. A wake touch performs only the wake action.

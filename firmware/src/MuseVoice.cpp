@@ -5,6 +5,8 @@
 #include "Muse.h"
 #include "MuseDisplay.h"
 #include "MuseVad.h"
+#include "SpeechFilter.h"
+#include "SpeechGate.h"
 #include "BufferedUpload.h"
 #include "SpeechGesture.h"
 #include <new>
@@ -137,13 +139,16 @@ bool Voice::begin(Microphone *mic, const char *token) {
 
   preRollStorage_ = static_cast<uint8_t *>(memory::external(muse::Vad::kPreRollFrames * sizeof(int16_t)));
   utteranceStorage_ = static_cast<int16_t *>(memory::external(muse::kUtteranceFrames * sizeof(int16_t)));
+  gateStorage_ = static_cast<int16_t *>(memory::external(
+      size_t(cfg::voice::kGateEdgeMs / 10) * muse::kGateFrameSamples * sizeof(int16_t)));
 
   auto cleanup = [&] {
+    heap_caps_free(gateStorage_); gateStorage_ = nullptr;
     heap_caps_free(preRollStorage_); preRollStorage_ = nullptr;
     heap_caps_free(utteranceStorage_); utteranceStorage_ = nullptr;
   };
 
-  if (!preRollStorage_ || !utteranceStorage_) { cleanup(); return false; }
+  if (!preRollStorage_ || !utteranceStorage_ || !gateStorage_) { cleanup(); return false; }
 
   if (!bunty_muse_chat_init()) { cleanup(); return false; }
 
@@ -301,35 +306,60 @@ void Voice::voiceTask(void *context) { static_cast<Voice *>(context)->run(); }
 void Voice::run() {
   int16_t pcm[320];
   muse::Vad vad;
-  muse::PreRoll preRoll(reinterpret_cast<int16_t *>(preRollStorage_));
+  // Audio is cleaned and classified in 10 ms frames. Before the detector confirms
+  // speech the last 320 ms wait in `ring`; from then on a gate keeps only speech
+  // and a short margin around it, so silence and background never reach Muse.
+  muse::FrameRing ring(reinterpret_cast<int16_t *>(preRollStorage_), muse::Vad::kPreRollFrames / muse::kGateFrameSamples);
+  muse::SpeechGate gate(gateStorage_, cfg::voice::kGateEdgeMs / 10);
+  SpeechFilter filter;
+  filter.begin();
+  int16_t slice[muse::kGateFrameSamples], clean[muse::kGateFrameSamples];
+  size_t sliceFill = 0;
   muse::UtteranceBuffer utterance(utteranceStorage_);
   bool museDone = false, failed = false, uploading = false, resumeListening = false;
+  // The wake-opened turn tolerates long pauses and gives up on silence.
+  bool patientNext = false, patientTurn = false;
+  size_t listenedFrames = 0;
+  constexpr size_t kPatientFrames = size_t(cfg::wake::kSilenceEndMs) * cfg::audio::kSampleRate / 1000;
 
   auto stop = [&] {
     speechGesture::clear(); detected_ = false; agentBusy = false;
     microphone_->setCapturing(false); microphone_->discard();
     muse_hatch_turn_cancel(); resumeListening = false;
-    vad.reset(); preRoll.reset(); utterance.reset(); uploading = false; museDone = false;
+    vad.reset(); ring.reset(); gate.reset(); sliceFill = 0; utterance.reset(); uploading = false; museDone = false;
     reactionUntil_ = 0;
     setPhase(Phase::Off); power::setRadioAwake(false);
   };
 
-  auto listen = [&] {
+  // `resume` keeps a wake turn's patience and elapsed silence: used after noise
+  // that turned out not to be speech, so repeated noise cannot hold the mic open.
+  auto listen = [&](bool resume = false) {
     speechGesture::clearSpeech(); detected_ = false; lastError_ = ""; agentBusy = false;
     microphone_->setCapturing(false); microphone_->discard();
-    vad.reset(); preRoll.reset(); utterance.reset(); uploading = false; museDone = false; failed = false;
+    vad.reset(); ring.reset(); gate.reset(); sliceFill = 0; utterance.reset(); uploading = false; museDone = false; failed = false;
     reactionUntil_ = 0;
+    if (!resume) { patientTurn = patientNext; listenedFrames = 0; }
+    patientNext = false;
+    vad.setPauseFrames(patientTurn ? kPatientFrames : muse::Vad::kPauseFrames);
     microphone_->setCapturing(true); setPhase(Phase::Listening);
     power::setRadioAwake(true);
   };
 
   auto finish = [&] {
     detected_ = false;
-    microphone_->setCapturing(false); setPhase(Phase::Thinking);
-    for (size_t n; (n = microphone_->read(reinterpret_cast<uint8_t *>(pcm), sizeof(pcm), 0));)
-      if (!utterance.append(pcm, n / sizeof(int16_t))) { lastError_ = "Voice note too long"; stop(); return; }
-    utterance.dropTail(vad.excessQuiet());
-    logPrintf("[voice] captured utterance: frames=%u\n", unsigned(utterance.frames()));
+    microphone_->setCapturing(false);
+    // What is still in the microphone ring is only the silence after the last word.
+    microphone_->discard();
+    const unsigned speechMs = unsigned(gate.speechFrames() * 10);
+    if (speechMs < cfg::voice::kMinSpeechMs) {
+      // The energy detector fired but there was no voice in it: send nothing.
+      logPrintf("[voice] only %u ms of speech in that noise; discarding, still listening\n", speechMs);
+      listen(true);
+      return;
+    }
+    setPhase(Phase::Thinking);
+    logPrintf("[voice] sending %u ms of speech (%u ms with margins)\n", speechMs,
+              unsigned(utterance.frames() * 1000 / cfg::audio::kSampleRate));
 
     if (muse_hatch_ready()) {
       struct UploadOps {
@@ -380,6 +410,7 @@ void Voice::run() {
   for (;;) {
     if (endRequested_.exchange(false)) { toggleRequested_ = false; stop(); }
     if (toggleRequested_.exchange(false)) {
+      const bool fromWake = wakeTurn_.exchange(false);
       if (phase_ == Phase::Listening) {
         if (uploading) finish(); else stop();
       } else if (phase_ == Phase::Speaking) {
@@ -388,7 +419,7 @@ void Voice::run() {
       } else {
         stop();
         if (muse_hatch_ready() || gatewayAvailable()) {
-          lastError_ = ""; muse::clearCaption(); resumeListening = true;
+          lastError_ = ""; muse::clearCaption(); resumeListening = true; patientNext = fromWake;
         } else {
           lastError_ = muse::wifiConnected() ? "Muse not connected" : "Wi-Fi not connected";
         }
@@ -401,22 +432,46 @@ void Voice::run() {
         size_t n = microphone_->read(reinterpret_cast<uint8_t *>(pcm), sizeof(pcm), 20);
         const size_t frames = n / sizeof(int16_t);
         if (frames) {
-          const auto event = vad.process(pcm, frames);
+          const bool servoNoise = int32_t(motionUntil_.load() - millis()) > 0;
+          const auto event = vad.process(pcm, frames, servoNoise);
+          // Silence is only counted once the head has stopped turning.
+          if (!uploading && !servoNoise) listenedFrames += frames;
+          if (patientTurn && !uploading && listenedFrames >= kPatientFrames) {
+            Serial.println("[voice] nothing said after the wake word; ending");
+            lastError_ = ""; stop();
+            continue;
+          }
+          // Clean and classify this chunk in whole 10 ms frames.
+          bool overflow = false;
+          auto keep = [&](const int16_t *audio, size_t count) { if (!utterance.append(audio, count)) overflow = true; };
+          for (size_t at = 0; at < frames;) {
+            const size_t take = std::min(frames - at, muse::kGateFrameSamples - sliceFill);
+            memcpy(slice + sliceFill, pcm + at, take * sizeof(int16_t));
+            sliceFill += take; at += take;
+            if (sliceFill < muse::kGateFrameSamples) break;
+            sliceFill = 0;
+            const bool speech = filter.process(slice, clean);
+            if (uploading) gate.push(clean, speech, keep);
+            else ring.push(clean, speech);
+          }
           if (!uploading) {
-            preRoll.push(pcm, frames);
             if (event == muse::Vad::Event::Started) {
               muse::clearCaption(); detected_ = true;
               uploading = true;
-              bool captured = true;
-              preRoll.flush([&](const int16_t *audio, size_t count) { captured = utterance.append(audio, count) && captured; });
-              if (!captured) { lastError_ = "Voice buffer unavailable"; stop(); }
+              gate.reset();
+              ring.flush([&](const int16_t *frame, bool speech) { gate.push(frame, speech, keep); });
+              if (overflow) { lastError_ = "Voice buffer unavailable"; stop(); }
               else Serial.println("[voice] speech detected; buffering");
             }
-          } else if (!utterance.append(pcm, frames)) {
+          } else if (overflow) {
             lastError_ = "Voice note too long"; stop();
           }
           if (uploading && event == muse::Vad::Event::Ended) {
             Serial.println("[voice] utterance ended; processing reaction"); finish();
+          } else if (uploading && event == muse::Vad::Event::Rejected) {
+            // A fan or hum that sounded like speech: drop it and keep listening.
+            Serial.println("[voice] steady noise, not speech; discarding");
+            detected_ = false; uploading = false; utterance.reset(); ring.reset(); gate.reset();
           }
         }
       }
