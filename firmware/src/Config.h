@@ -64,9 +64,9 @@ constexpr uint32_t kBacklightPwmHz = 12000;
 constexpr uint8_t kSleepBacklightDuty = 8;
 // Temporary bench check: at boot, show each emotion's face for 5 s, forever.
 constexpr bool kFaceDemo = false;
-// Bunty's screen is for its face and pictures. False withholds every Muse tool
-// that draws words or lists; pairing and Settings still need theirs.
-constexpr bool kTextContent = false;
+// Bunty's screen displays expressive face, pictures, and structured UI cards
+// (calendar agenda, weather/stock cards, task lists, and notes).
+constexpr bool kTextContent = true;
 constexpr uint32_t kPairingActivityFrameMs = 420;
 constexpr uint32_t kIdleSleepMs = 120000;
 
@@ -143,8 +143,8 @@ constexpr uint16_t kReserveMilliamps = 350;
 constexpr uint16_t kBaseMilliamps = 300;      // module, panel, radio average
 constexpr uint16_t kBacklightMilliamps = 80;  // at full duty
 constexpr uint16_t kServoMilliamps = 750;     // SG90 under load
-constexpr uint16_t kAudioMilliamps = 300;     // MAX98357 into 4 ohm at speech volume
-// Both servos while dancing to speech: small arcs at a capped glide rate, so
+constexpr uint16_t kAudioMilliamps = 0;       // No MAX98357 amplifier/speaker: pure silent pantomime companion
+// Both servos while gesturing/dancing: small arcs at a capped glide rate, so
 // neither ever approaches the stall current kServoMilliamps budgets for.
 constexpr uint16_t kDanceMilliamps = 440;
 
@@ -167,7 +167,7 @@ constexpr int8_t kWifiTxPowerQuarterDbm = 52;
 constexpr int8_t kVoiceTxPowerQuarterDbm = 68;
 
 // APB stays at 80 MHz across these, so servo LEDC and display SPI are unaffected.
-constexpr uint32_t kIdleAfterMs = 1500;
+constexpr uint32_t kIdleAfterMs = 30000;
 constexpr uint8_t kIdleCpuMhz = 80;
 constexpr uint8_t kActiveCpuMhz = 240;
 
@@ -191,7 +191,7 @@ constexpr int kMicShift = 13;
 constexpr uint32_t kMicSlotRatio = 8;
 constexpr size_t kCaptureRingBytes = 256000;  // 8 s: covers a slow Muse uplink setup
 
-constexpr uint8_t kVolumePercent = 95;
+constexpr uint8_t kVolumePercent = 100;
 constexpr int kSpeakerDmaBuffers = 4;
 constexpr int kSpeakerDmaFrames = 240;
 constexpr uint32_t kSpeakerDrainMs =
@@ -207,7 +207,7 @@ namespace voice {
 #define IOT_GATEWAY_HOST "bunty.underdogthinkers.com"
 #endif
 constexpr char kGatewayHost[] = IOT_GATEWAY_HOST;
-constexpr uint32_t kFaceFrameMs = 45;
+constexpr uint32_t kFaceFrameMs = 25;
 constexpr uint32_t kInputFullScaleRms = 1500;
 }  // namespace voice
 

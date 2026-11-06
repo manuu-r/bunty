@@ -6,6 +6,11 @@ import {
   verifyVoiceUiPassword,
 } from "./ui-auth.js";
 import {
+  appendTurn,
+  loadHistory,
+  normalizeSessionId,
+} from "./history.js";
+import {
   LiveSessionError,
   openLiveSession,
   readLiveHandshake,
@@ -22,6 +27,8 @@ const VOICE_LOGOUT_ROUTE = "/v1/voice/logout";
 const VOICE_CHAT_ROUTE = "/v1/voice/chat";
 const VOICE_SPEAK_ROUTE = "/v1/voice/speak";
 const VOICE_LIVE_ROUTE = "/v1/voice/live";
+const VOICE_TURN_ROUTE = "/v1/voice/turn";
+const TURN_ROUTE = "/v1/turn";
 
 export default {
   /**
@@ -75,6 +82,10 @@ export default {
 
     if (url.pathname === "/v1/speak") {
       return handleDeviceSpeech(request, env);
+    }
+
+    if (url.pathname === VOICE_TURN_ROUTE || url.pathname === TURN_ROUTE) {
+      return handleDeviceTurn(request, env);
     }
 
     if (url.pathname === VOICE_SPEAK_ROUTE) {
@@ -303,6 +314,231 @@ async function handleDeviceSpeech(request, env) {
       "X-Audio-Byte-Order": "little-endian",
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+/**
+ * Wraps raw mono 16-bit linear PCM in a standard 44-byte WAV header.
+ * @param {Uint8Array} pcm
+ * @param {number} sampleRate
+ * @returns {Uint8Array}
+ */
+function pcmToWav(pcm, sampleRate = 16000) {
+  const wav = new Uint8Array(44 + pcm.byteLength);
+  const view = new DataView(wav.buffer);
+  wav[0] = 0x52; wav[1] = 0x49; wav[2] = 0x46; wav[3] = 0x46; // "RIFF"
+  view.setUint32(4, 36 + pcm.byteLength, true);
+  wav[8] = 0x57; wav[9] = 0x41; wav[10] = 0x56; wav[11] = 0x45; // "WAVE"
+  wav[12] = 0x66; wav[13] = 0x6d; wav[14] = 0x74; wav[15] = 0x20; // "fmt "
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, 1, true); // Mono = 1 channel
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // Byte rate
+  view.setUint16(32, 2, true); // Block align
+  view.setUint16(34, 16, true); // 16 bits per sample
+  wav[36] = 0x64; wav[37] = 0x61; wav[38] = 0x74; wav[39] = 0x61; // "data"
+  view.setUint32(40, pcm.byteLength, true);
+  wav.set(pcm, 44);
+  return wav;
+}
+
+/**
+ * Unified turn route for physical device fallback when Muse is offline.
+ * Audio in (16 kHz linear PCM or WAV) -> Whisper STT -> Claude Haiku -> Aura TTS,
+ * streaming back framed PCM with expression cues (identical format to /v1/speak).
+ * @param {Request} request
+ * @param {Record<string, any>} env
+ */
+async function handleDeviceTurn(request, env) {
+  if (request.method !== "POST") {
+    return errorResponse("method_not_allowed", "Use POST for this endpoint.", 405, { Allow: "POST" });
+  }
+
+  const authentication = await authenticateRequest(request, env);
+  if (authentication.response) return authentication.response;
+  const device = authentication.device;
+
+  const rateLimitResponse = await enforceRateLimit(env.DEVICE_RATE_LIMITER, device.id, "turn");
+  if (rateLimitResponse) return rateLimitResponse;
+
+  let config;
+  try {
+    config = readConfig(env);
+  } catch (error) {
+    logFailure("worker_configuration_invalid", error);
+    return errorResponse("service_unavailable", "Gateway configuration is invalid.", 503);
+  }
+
+  const requestId = `${device.id}:turn:${crypto.randomUUID()}`;
+  const maxAudioBytes = config.liveAudioSampleRate * 2 * 45; // 45 seconds max
+  let audioBuffer;
+  try {
+    const contentLength = Number(request.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maxAudioBytes) {
+      return errorResponse("payload_too_large", "Audio recording exceeds maximum duration.", 413);
+    }
+    audioBuffer = await request.arrayBuffer();
+  } catch (error) {
+    logFailure("device_turn_read_failed", error, { requestId });
+    return errorResponse("invalid_request", "Could not read audio stream.", 400);
+  }
+
+  if (!audioBuffer || audioBuffer.byteLength < 1600) {
+    return errorResponse("invalid_request", "Audio recording is too short.", 400);
+  }
+
+  const uint8 = new Uint8Array(audioBuffer);
+  const isWav = uint8.byteLength >= 12 &&
+    uint8[0] === 0x52 && uint8[1] === 0x49 && uint8[2] === 0x46 && uint8[3] === 0x46;
+  const wavBytes = isWav ? uint8 : pcmToWav(uint8, config.liveAudioSampleRate);
+
+  let sttResult;
+  try {
+    sttResult = await env.AI.run(
+      config.batchSttModel,
+      { audio: Array.from(wavBytes) },
+      aiOptions(config, device.id, requestId),
+    );
+  } catch (error) {
+    const upstreamStatus = Number(error?.status);
+    const rateLimited = upstreamStatus === 429;
+    logFailure("device_turn_stt_failed", error, {
+      requestId,
+      upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : undefined,
+    });
+    return errorResponse(
+      rateLimited ? "ai_budget_or_rate_limit" : "upstream_error",
+      rateLimited ? "AI usage limit reached. Try again later." : "Speech transcription failed.",
+      rateLimited ? 429 : 502,
+      rateLimited ? { "Retry-After": "60" } : undefined,
+    );
+  }
+
+  const userText = typeof sttResult?.text === "string" ? sttResult.text.trim() : "";
+  if (!userText) {
+    return errorResponse("no_speech_detected", "No speech could be recognized.", 400);
+  }
+
+  const url = new URL(request.url);
+  const sessionId =
+    normalizeSessionId(request.headers.get("x-bunty-session")) ||
+    normalizeSessionId(url.searchParams.get("session")) ||
+    null;
+
+  let history = [];
+  if (device.preserveSessionHistory !== false && sessionId && env.DEVICES_DB) {
+    try {
+      history = await loadHistory(env, device.id, sessionId, config.historyTurns || 6);
+    } catch (error) {
+      logFailure("device_turn_history_failed", error, { requestId });
+    }
+  }
+
+  const maxTokens = Math.min(
+    device.maxOutputTokens ?? config.voiceMaxOutputTokens,
+    config.globalMaxOutputTokens,
+  );
+  let modelResult;
+  try {
+    modelResult = await env.AI.run(
+      config.model,
+      {
+        system: config.voiceSystemPrompt,
+        max_tokens: maxTokens,
+        messages: [
+          ...history,
+          { role: "user", content: userText },
+        ],
+      },
+      aiOptions(config, device.id, requestId),
+    );
+  } catch (error) {
+    const upstreamStatus = Number(error?.status);
+    const rateLimited = upstreamStatus === 429;
+    logFailure("device_turn_inference_failed", error, {
+      requestId,
+      upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : undefined,
+    });
+    return errorResponse(
+      rateLimited ? "ai_budget_or_rate_limit" : "upstream_error",
+      rateLimited ? "AI usage limit reached. Try again later." : "AI could not generate a reply.",
+      rateLimited ? 429 : 502,
+      rateLimited ? { "Retry-After": "60" } : undefined,
+    );
+  }
+
+  const assistantReply = assistantText(modelResult);
+  if (!assistantReply) {
+    return errorResponse("upstream_error", "AI produced an empty reply.", 502);
+  }
+
+  if (device.preserveSessionHistory !== false && sessionId && env.DEVICES_DB) {
+    try {
+      await appendTurn(env, device.id, sessionId, userText, assistantReply, config.historyTurns || 6);
+    } catch (error) {
+      logFailure("device_turn_append_history_failed", error, { requestId });
+    }
+  }
+
+  const segments = speechSegments(assistantReply);
+  if (segments.length === 0) {
+    return errorResponse("invalid_request", "There is nothing to say in that reply.", 400);
+  }
+
+  const acceptHeader = (request.headers.get("accept") || "").toLowerCase();
+  const silentMode =
+    acceptHeader.includes("application/json") ||
+    request.headers.get("x-bunty-output") === "silent";
+
+  if (silentMode) {
+    return jsonResponse(
+      {
+        ok: true,
+        transcript: userText,
+        reply: assistantReply,
+        emotion: segments[0]?.emotion || "neutral",
+        gesture: segments[0]?.gesture || null,
+        picture: segments[0]?.picture || null,
+      },
+      200,
+      {
+        "X-Transcript": encodeURIComponent(userText),
+        "X-Reply": encodeURIComponent(assistantReply),
+        "X-Emotion": segments[0]?.emotion || "neutral",
+        "X-Picture": segments[0]?.picture || "",
+      },
+    );
+  }
+
+  const audioBody = async (segment) => {
+    const response = audioResponse(await synthesize(env, config, segment, device.id, requestId));
+    if ((response.headers.get("Content-Type") || "").includes("json")) {
+      throw new TypeError("TTS returned JSON instead of audio.");
+    }
+    return response.body;
+  };
+
+  let firstBody;
+  try {
+    firstBody = await audioBody(segments[0].text);
+  } catch (error) {
+    return speechFailure(error, requestId);
+  }
+
+  const body = speechStream(segments, firstBody, audioBody, (error) => {
+    logFailure("device_speech_interrupted", error, { requestId });
+  });
+
+  return new Response(body, {
+    headers: {
+      "Content-Type": `application/vnd.bunty.speech;rate=${config.liveAudioSampleRate};channels=1`,
+      "X-Audio-Byte-Order": "little-endian",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Transcript": encodeURIComponent(userText),
+      "X-Reply": encodeURIComponent(assistantReply),
     },
   });
 }
@@ -816,6 +1052,7 @@ function readConfig(env) {
     gatewayId: requiredString(env.AI_GATEWAY_ID, "AI_GATEWAY_ID"),
     model: requiredString(env.AI_MODEL, "AI_MODEL"),
     sttModel: requiredString(env.STT_MODEL, "STT_MODEL"),
+    batchSttModel: env.BATCH_STT_MODEL ? String(env.BATCH_STT_MODEL).trim() : "@cf/openai/whisper",
     ttsModel: requiredString(env.TTS_MODEL, "TTS_MODEL"),
     ttsSpeaker: requiredString(env.TTS_SPEAKER, "TTS_SPEAKER"),
     systemPrompt: requiredString(env.SYSTEM_PROMPT, "SYSTEM_PROMPT"),

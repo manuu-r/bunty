@@ -106,9 +106,42 @@ header.chmod(0o600)
 
 # Keep voice audio and gadget instructions in the same request. Only Bunty
 # changes the message; generic SDK boards retain their original empty message.
+bunty_prompt = (
+    "This voice note is from Bunty, a small speaking gadget. Reply naturally and concisely. "
+    "Only fetch or show screen content when the user asks for it; show the requested view only. "
+    "Do not automatically load calendars, tasks, notes, dashboards or unrelated summaries. "
+    "Keep the companion face for ordinary conversation. For requested GIFs or images, "
+    "use an existing direct URL if it meets the device limits; do not upload or recreate a usable image. "
+    "Never show images of words. Any necessary image-hosting approval is handled in the Muse app. "
+    "Along with the spoken reply, perform it: begin every sentence with one expression tag, "
+    "exactly one of [neutral] [soft] [happy] [excited] [angry] [sad] [curious] [sassy], adding [nod] "
+    "or [shake] after it when the sentence agrees or disagrees. Bunty acts on each tag with its face "
+    "and head at the moment that sentence is spoken, and tags are never spoken aloud. Right after the "
+    "expression tag of the sentence it suits, add one picture tag: [sun] [moon] [cloud] [rain] [snow] [storm] [heart] [sparkle] [party] [tear] [fire] [coffee] [food] [music] [idea] [check] [cross] [clock] [calendar] [mail] [search] [rocket]. "
+    "It fills the screen from that sentence until Bunty stops "
+    "speaking, so choose what the reply is about or how it feels, at most one or two per reply. "
+    "Do not call bunty.gesture for spoken replies or bunty.look during conversation. Apart from the tags, "
+    "write plain speakable sentences with no markdown, lists, emoji or URLs. If a task will take more than "
+    "a moment, say so first in one short sentence, then do it and give the result in a separate message. "
+    "For meme or GIF requests, instead include gesture and speed in the display.show_gif or display.draw_url "
+    "call so movement starts with the picture even without speech. Choose movement and tempo to match the meme: "
+    "happy for funny or excited, curious for confused or surprised, nod for agreement, shake for disapproval, "
+    "neutral for stillness. Prefer fast for energetic memes and normal for calmer ones; use slow only when "
+    "deliberate slow motion suits the request. Bunty has no speaker, so communicate visually: for calendar events "
+    "use ui.set_agenda; for weather, stock prices, message status (e.g. Instagram DMs), metrics or briefs use "
+    "ui.show_card; for live long-running tasks use bunty.progress; and for instant reactions use bunty.react "
+    "with cute servo gestures and punchy 1-to-3 word captions. When a user request is out of scope, unsupported, "
+    "or impossible, do not show a boring text refusal: instead, display a funny cat GIF or meme animation using "
+    "display.draw_url or display.show_gif, attach an amused servo gesture (shake, puppytilt, or shimmy), and "
+    "react with a playful 1-to-3 word caption like 'NO CLUE', 'CAN\\'T DO', or 'CAT TIME!'. "
+    "Do not invent events or claim a provider update succeeded without actually updating it."
+)
+escaped_bunty_prompt = bunty_prompt.replace('"', '\\"').replace("'", "\\'")
+
 if '#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
     replace('components/muse/muse_chat_priv.h', '#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\"," \\\n    "\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""',
-            '#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"This voice note is from Bunty, a small speaking gadget. Reply naturally and concisely. Along with the spoken reply, choose a suitable servo movement by calling bunty.gesture before replying: neutral, nod, shake, curious or happy. Use neutral if no movement suits the reply. The device controls safe angles, speed and power; do not use bunty.look during conversation. Keep movement instructions and tool markup out of the spoken text. When asked to show calendar events, tasks, notes or information, use the registered ui tools with real available data. Do not invent events or claim a provider update succeeded without actually updating it.\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\",\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#else\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\"," \\\n    "\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#endif')
+            '#if CONFIG_BUNTY_MUSE\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"' + escaped_bunty_prompt + '\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\",\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#else\n#define MUSE_HATCH_NOTE_HEAD \\\n    "{\\"message\\":\\"\\",\\"output_modality\\":\\"text\\",\\"items\\":[{\\"type\\":\\"file\\"," \\\n    "\\"mime_type\\":\\"audio/wav\\",\\"filename\\":\\"voice_note.wav\\",\\"data_base64\\":\\""\n#endif')
+
 
 replace('components/muse/muse_chat_priv.h', '#include "muse_chat.h"',
         '#ifdef ESP_PLATFORM\n#include "sdkconfig.h"\n#endif\n#include "muse_chat.h"')
@@ -320,7 +353,7 @@ replace('components/muse/muse_chat_link.c',
 replace('components/muse/muse_chat_link.c', 'static int64_t s_reply_progress_us;',
         'static int64_t s_reply_progress_us;\nstatic bool s_agent_busy, s_agent_known;')
 replace('components/muse/muse_chat_link.c', '    bool append = !strcmp(s_row.event, "delta.text_append");',
-        '    if (!strcmp(s_row.event, "agent.status") || !strcmp(s_row.event, "task.status")) {\n        const char *state = s_row.activity[0] ? s_row.activity : s_row.status;\n        if (!state[0]) return;\n        s_agent_busy = strcmp(state, "online") && strcmp(state, "idle")\n            && strcmp(state, "completed") && strcmp(state, "failed");\n        /* Idle before any work is the state at subscribe, not a finish. */\n        s_agent_known = s_agent_known || s_agent_busy;\n        bunty_muse_agent_busy(s_agent_busy);\n        return;\n    }\n    bool append = !strcmp(s_row.event, "delta.text_append");')
+        '    if (!strcmp(s_row.event, "agent.status") || !strcmp(s_row.event, "task.status")) {\n        const char *state = s_row.activity[0] ? s_row.activity : s_row.status;\n        if (!state[0]) return;\n        s_agent_busy = strcmp(state, "online") && strcmp(state, "idle")\n            && strcmp(state, "completed") && strcmp(state, "failed");\n        /* Idle before any work is the state at subscribe, not a finish. */\n        s_agent_known = s_agent_known || s_agent_busy;\n        bunty_muse_agent_busy(s_agent_busy);\n        bunty_muse_agent_activity(s_agent_busy ? state : NULL);\n        return;\n    }\n    bool append = !strcmp(s_row.event, "delta.text_append");')
 replace('components/muse/muse_chat_link.c', '        s_last_seq = 0; s_reply_progress_us = 0;',
         '        s_last_seq = 0; s_reply_progress_us = 0; s_agent_busy = s_agent_known = false;')
 replace('components/muse/muse_chat_link.c', '    bool skipped_big = s_skipped_big;',
@@ -334,10 +367,10 @@ replace('components/muse/muse_chat_link.c',
 if 'one picture tag' not in (SDK / 'components/muse/muse_chat_priv.h').read_text():
     replace('components/muse/muse_chat_priv.h',
             'When asked to show calendar events, tasks, notes or information, use the registered ui tools with real available data.',
-            'Bunty has no text on its screen, so give calendars, tasks, notes and information aloud and briefly from real available data.')
+            'Bunty has no speaker, so communicate visually: for calendar events use ui.set_agenda; for weather, stock prices, message status (e.g. Instagram DMs), metrics or briefs use ui.show_card; for live long-running tasks use bunty.progress; and for instant reactions use bunty.react with cute servo gestures and punchy 1-to-3 word captions.')
     replace('components/muse/muse_chat_priv.h',
             'Use structured ui tools or display.show_text for information instead of making an image.',
-            'Never show images of words.')
+            'Use ui.show_card or ui.set_agenda for structured cards and calendars.')
     replace('components/muse/muse_chat_priv.h',
             'and tags are never spoken aloud.',
             'and tags are never spoken aloud. Right after the expression tag of the sentence it suits, add one picture tag: [sun] [moon] [cloud] [rain] [snow] [storm] [heart] [sparkle] [party] [tear] [fire] [coffee] [food] [music] [idea] [check] [cross] [clock] [calendar] [mail] [search] [rocket]. It fills the screen from that sentence until Bunty stops speaking, so choose what the reply is about or how it feels, at most one or two per reply.')

@@ -1,2 +1,9 @@
 .DS_Store
 .vscode/
+hardware
+
+# hardware_test build output
+hardware_test/build/
+hardware_test/sdkconfig
+hardware_test/sdkconfig.old
+hardware_test/dependencies.lock

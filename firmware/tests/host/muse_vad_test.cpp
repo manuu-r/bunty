@@ -25,10 +25,10 @@ int main() {
   // A short hesitation survives; more speech resets the silence timer.
   for (int i=0;i<30;++i) assert(frame(vad,100)==Event::None);
   assert(frame(vad,2000)==Event::None);
-  for (int i=0;i<44;++i) assert(frame(vad,100)==Event::None);
+  for (int i=0;i<32;++i) assert(frame(vad,100)==Event::None);
   assert(frame(vad,100)==Event::Ended);
-  // The 900 ms endpoint is silence nobody needs to upload; 250 ms stays.
-  assert(vad.excessQuiet()==14400-muse::Vad::kTailFrames);
+  // The 660 ms endpoint is silence nobody needs to upload; 250 ms stays.
+  assert(vad.excessQuiet()==muse::Vad::kPauseFrames-muse::Vad::kTailFrames);
   vad.reset(); assert(vad.excessQuiet()==0); start(vad);
   for (int i=0;i<1494;++i) assert(frame(vad,2000)==Event::None);
   assert(frame(vad,2000)==Event::Ended);  // 30-second safety cap.

@@ -316,21 +316,63 @@ void hideVoiceFace() {
 }
 
 // Voice is expressed by the face and independently composed border aura.
-// Keep the same mouth through listening/thinking; output energy drives speech.
+// Pantomime companion: cute emotion eyes, physical servo gestures, punchy short reactions,
+// and progress indicators for long running tasks without cluttering the screen.
 void serviceVoiceFace(uint32_t now) {
   const auto phase=voice.phase();
   const bool changed=phase!=shownPhase;
+  const auto prevPhase=shownPhase;
   shownPhase=phase;
   animations->setAttention(phase==Voice::Phase::Listening?Face::Attention::Listening:
     phase==Voice::Phase::Speaking?Face::Attention::Speaking:
     voice.working()?Face::Attention::Working:Face::Attention::Thinking);
   animations->setEmotion(phase==Voice::Phase::Speaking?voice.emotion():Emotion::Neutral);
   {ui::Guard guard;animations->serviceSpeaking(now);}
+
+  // Non-verbal reaction text below the eyes during speaking/reacting phase:
+  static bool reactionShown=false;
+  if(phase==Voice::Phase::Speaking) {
+    if(!reactionShown || changed) {
+      char cap[64]={};
+      muse::caption(cap,sizeof(cap));
+      if(cap[0]) {
+        ui::Guard guard;
+        animations->drawReaction(cap);
+        reactionShown=true;
+      }
+    }
+  } else if(reactionShown || (changed && prevPhase==Voice::Phase::Speaking)) {
+    ui::Guard guard;
+    animations->clearReaction();
+    reactionShown=false;
+  }
+
+  // Live progress indicator during long-running tasks:
+  static bool progressShown=false;
+  static uint32_t lastProgressFrame=0;
+  if(voice.working()) {
+    char status[32]={};
+    int percent=-1;
+    const bool hasProgress=muse::getProgress(status,sizeof(status),percent);
+    if(now-lastProgressFrame>=60 || !progressShown) {
+      lastProgressFrame=now;
+      ui::Guard guard;
+      animations->drawProgress(hasProgress && status[0] ? status : "WORKING...", percent, now);
+      progressShown=true;
+    }
+  } else if(progressShown) {
+    ui::Guard guard;
+    animations->clearProgress();
+    progressShown=false;
+  }
+
   if(!changed && now-lastFaceFrameAt<cfg::voice::kFaceFrameMs)return;
   lastFaceFrameAt=now;
   const float level=phase==Voice::Phase::Speaking?voice.outputLevel():0;
   ui::Guard guard;
-  animations->drawSpeakingMouth(uint8_t(level*100.f));
+  if(!reactionShown) {
+    animations->drawSpeakingMouth(uint8_t(level*100.f));
+  }
 }
 
 // Returns true while the conversation owns the screen and touch.
@@ -412,7 +454,7 @@ void serviceRuntime() {
     const auto action=shell::service(event,muse::connected(),voice.phase()==Voice::Phase::Speaking,now);
     if(action==shell::Action::Talk) {
       if(voice.ready()) {shell::hide();if(!voice.active())voice.toggle();}
-      else showNotice("Muse is connecting",1200);
+      else showNotice(muse::wifiConnected() ? "Connecting to voice" : "Wi-Fi connecting", 1200);
     } else if(action==shell::Action::Face) {
       shell::showFace();shell::takeFaceRequest();showIdleFace();
     } else if(action==shell::Action::Settings) {
@@ -439,7 +481,7 @@ void serviceRuntime() {
     }
     if(event.kind==touch::Event::Kind::kTap) {
       if(voice.ready())voice.toggle();
-      else showNotice("Muse is connecting",1200);
+      else showNotice(muse::wifiConnected() ? "Connecting to voice" : "Wi-Fi connecting", 1200);
       return;
     }
     if(event.kind==touch::Event::Kind::kLongPress) {openSettings();return;}
@@ -715,7 +757,8 @@ void loop() {
     memory::report();
   }
   memory::recordLoop(uint32_t(esp_timer_get_time()-loopStarted));
-  delay(8);
+  const bool activeLoop = (displayState != DisplayState::Sleeping) || voice.active();
+  delay(activeLoop ? 1 : 8);
 }
 
 // Report the previous reset before display/radio startup, including brownouts,
@@ -737,6 +780,7 @@ const char *resetReasonName(esp_reset_reason_t reason) {
   }
 }
 extern "C" void app_main() {
+  vTaskPrioritySet(nullptr, 3);
   const auto reason=esp_reset_reason();
   logPrintf("[boot] previous reset=%s (%d)\n",resetReasonName(reason),int(reason));
   if (!platformInit()) {

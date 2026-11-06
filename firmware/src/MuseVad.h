@@ -13,6 +13,7 @@ class Vad {
   enum class Event { None, Started, Ended };
   static constexpr size_t kPreRollFrames = 5120;  // 320 ms, including onset.
   static constexpr size_t kTailFrames = 4000;     // 250 ms kept after the last word.
+  static constexpr size_t kPauseFrames = 10560;   // 660 ms pause (survives 600 ms hesitation, responds fast)
   void reset() { onset_ = quiet_ = duration_ = 0; speaking_ = false; }
   bool speaking() const { return speaking_; }
   // Silence recorded past the last word: it only delays the upload.
@@ -39,7 +40,7 @@ class Vad {
     } else {
       duration_ += frames;
       quiet_ = loud ? 0 : quiet_ + frames;
-      if (quiet_ >= 14400 || duration_ >= 480000) {  // 900 ms pause / 30 s cap.
+      if (quiet_ >= kPauseFrames || duration_ >= 480000) {  // 660 ms pause / 30 s cap.
         speaking_ = false;
         return Event::Ended;
       }

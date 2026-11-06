@@ -7,8 +7,8 @@
 namespace audio {
 // A power of two keeps index wrapping correct across uint32_t overflow.
 constexpr size_t kPlaybackFrames=65536;  // 4 s of PSRAM
-constexpr size_t kPrebufferFrames=4800;  // 300 ms rides out Wi-Fi and TLS stalls
-constexpr size_t kRebufferFrames=1600;   // 100 ms, after an underrun
+constexpr size_t kPrebufferFrames=2400;  // 150 ms rides out Wi-Fi and TLS stalls
+constexpr size_t kRebufferFrames=1200;   // 75 ms, after an underrun
 constexpr size_t kBlockFrames=320;       // 20 ms: the resolution of cues and level
 constexpr size_t kChimeFrames=3200;      // 200 ms
 constexpr uint32_t kAudioClaimMs=2000;
@@ -75,7 +75,7 @@ template<class Io> class SpeechPlayer {
         else {
           // Pushes precede seal(), so sealed and empty means nothing is coming.
           if(sealed_.load() && !available())sealed_.store(false);
-          io_.wait(20);
+          io_.wait(5);
         }
         return;
       case State::Waiting:

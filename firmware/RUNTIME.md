@@ -9,10 +9,10 @@ must not fall back into the internal heap used by Wi-Fi and DMA.
 
 | Task | Stack bytes | Priority / affinity | Owns |
 | --- | ---: | --- | --- |
-| Main | 8,192 | IDF main / core 0 | UI state, framebuffer transactions, power policy, motion arbitration |
+| Main | 8,192 | 3 / core 0 | UI state, framebuffer transactions, power policy, motion arbitration |
 | Muse link | 12,288 | 4 / scheduler | SDK lifecycle and connectivity; SDK also owns its network workers |
-| Muse voice | 8,192 | 4 / scheduler | SDK turn APIs, VAD, microphone ring reader, conversation phase |
-| Muse TTS | 12,288 | 4 / scheduler | Gateway HTTP, frame decoding, response-slot cleanup |
+| Muse voice | 8,192 | 4 / core 0 | SDK turn APIs, VAD, microphone ring reader, conversation phase |
+| Muse TTS | 12,288 | 4 / core 0 | Gateway HTTP, frame decoding, response-slot cleanup |
 | Muse audio | 4,096 | 5 / core 1 | Speaker I2S and its power claim, playback clock, cues, loudness |
 | Microphone | 4,096 | 6 / core 1 | I2S RX, signal processing, capture ring producer |
 | Touch | 2,560 | 2 / core 1 | I2C and press tracking; bounded event queue |

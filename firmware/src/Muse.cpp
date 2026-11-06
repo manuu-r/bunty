@@ -43,6 +43,10 @@ QueueHandle_t motionQueue = nullptr;
 portMUX_TYPE captionLock = portMUX_INITIALIZER_UNLOCKED;
 char captionText[1024] = {};
 uint32_t captionAt=0;
+portMUX_TYPE progressLock = portMUX_INITIALIZER_UNLOCKED;
+char progressStatus[32] = {};
+int progressPercent = -1;
+bool progressActive = false;
 void appTask(void *) { app_run(); vTaskDelete(nullptr); }
 cJSON *result(bool ok, const char *error = nullptr, const char *code = "invalid_params") {
   cJSON *r=cJSON_CreateObject(); cJSON_AddBoolToObject(r,"ok",ok);
@@ -56,6 +60,7 @@ cJSON *result(bool ok, const char *error = nullptr, const char *code = "invalid_
 }
 namespace muse {
 bool connected() { return noise_ctrl_is_connected(); }
+bool wifiConnected() { return wifi_mgr_is_connected(); }
 const char *network() { static char name[33]; config_get_str("ssid",name,sizeof(name)); return name; }
 void disconnect() { noise_ctrl_disconnect(); wifi_mgr_disconnect(); }
 bool paired() { return config_setup_complete() && config_is_provisioned(); }
@@ -64,12 +69,42 @@ void resetPairing() {
   ESP.restart();
 }
 void clearCaption() { portENTER_CRITICAL(&captionLock); captionText[0]=0; portEXIT_CRITICAL(&captionLock); }
+void setCaption(const char *text) {
+  if(!text || !text[0]) return;
+  portENTER_CRITICAL(&captionLock); strlcpy(captionText,text,sizeof(captionText)); captionAt=millis(); portEXIT_CRITICAL(&captionLock);
+}
 void caption(char *out,size_t size) {
   if(!out || !size) return;
   char text[1024]; uint32_t since;
   portENTER_CRITICAL(&captionLock); strlcpy(text,captionText,sizeof(text)); since=captionAt; portEXIT_CRITICAL(&captionLock);
   out[0]=0;
-  if(text[0]) muse_hatch_caption_at(text,std::min<size_t>(size_t(uint64_t(millis()-since)*14/1000),strlen(text)-1),out,size);
+  if(text[0]) {
+    // For punchy short reactions (1-3 words), deliver immediately without waiting on typewriter ticks:
+    if(strlen(text) <= 32) strlcpy(out, text, size);
+    else muse_hatch_caption_at(text,std::min<size_t>(size_t(uint64_t(millis()-since)*14/1000),strlen(text)-1),out,size);
+  }
+}
+void setProgress(const char *status, int percent) {
+  portENTER_CRITICAL(&progressLock);
+  strlcpy(progressStatus, status ? status : "", sizeof(progressStatus));
+  progressPercent = percent;
+  progressActive = true;
+  portEXIT_CRITICAL(&progressLock);
+}
+void clearProgress() {
+  portENTER_CRITICAL(&progressLock);
+  progressStatus[0] = 0;
+  progressPercent = -1;
+  progressActive = false;
+  portEXIT_CRITICAL(&progressLock);
+}
+bool getProgress(char *status, size_t size, int &percent) {
+  portENTER_CRITICAL(&progressLock);
+  const bool active = progressActive;
+  if (active && status && size) strlcpy(status, progressStatus, size);
+  percent = progressPercent;
+  portEXIT_CRITICAL(&progressLock);
+  return active;
 }
 void service(ServoMotion *yaw,ServoMotion *pitch,float yawHome,float pitchHome,bool conversationActive) {
   static Motion motion={};
@@ -162,11 +197,12 @@ void bunty_muse_register(cJSON *commands) {
   cJSON *draw=cJSON_GetObjectItem(commands,"display.draw_url");
   if(draw) {
     cJSON_ReplaceItemInObject(draw,"description",cJSON_CreateString(
-      "Download and display an image on Bunty's rectangular 240x320 colour LCD. "
+      "Download and display an image or animated GIF on Bunty's rectangular 240x320 colour LCD. "
       "Bunty downloads the URL directly; it does not require uploading the image "
       "to another service. Prefer an existing direct image/GIF URL when it meets "
-      "the limits. Do not re-upload or generate a replacement for a usable URL. "
-      "Never use this for images of words: Bunty's screen shows no text. "
+      "the limits. If a user request is out of scope, unsupported, or impossible, "
+      "fetch and display a funny cat GIF or funny meme animation here with an amused "
+      "servo gesture (shake, puppytilt, or sassy shimmy). "
       "Use a baseline (not progressive) JPEG, downscaled by 1/2, 1/4 or 1/8 to fit "
       "and centred by default. Or supply raw RGB565, high byte first, 480 bytes "
       "per row, at most 320 rows. Animated GIF87a/GIF89a also supported: "
@@ -178,7 +214,7 @@ void bunty_muse_register(cJSON *commands) {
       "to baseline JPEG or RGB565 before sending. HTTP and HTTPS URLs supported; "
       "same-scheme redirects only. Replies after a complete, successful image is "
       "displayed. Failed downloads keep the previous screen. Tap or call "
-      "display.show_animation to return to Bunty's face. Busy while speech downloads."));
+      "display.show_animation to return to Bunty's face."));
     cJSON *row=cJSON_GetObjectItem(cJSON_GetObjectItem(draw,"optional"),"row");
     if(row) cJSON_ReplaceItemInObject(row,"description",cJSON_CreateString(
       "Integer -1 to 319. Default -1 centres JPEGs, zooms GIFs edge-to-edge with centred cropping; RGB565 starts at 0. Explicit row places GIFs at native size."));
@@ -196,17 +232,11 @@ void bunty_muse_register(cJSON *commands) {
   cJSON *gifShow=cJSON_AddObjectToObject(commands,"display.show_gif");
   cJSON_AddStringToObject(gifShow,"description",
     "Fastest direct GIF display: send only data_base64, ONE call, no transfer ID, byte count, "
-    "CRC32, begin/chunks/commit or preparatory display.info call. Read the real file and "
-    "base64-encode it with a file/code tool; do not invent bytes. Max 6144 decoded bytes. "
-    "GIF is already compressed: no ZIP/gzip. Bunty immediately decodes and zooms it edge-to-edge "
-    "on the full 240x320 screen with proportions preserved and centred crop. "
-    "Keep row omitted for fullscreen. Invalid files keep the previous screen. "
-    "Prefer this over bunty.gif_transfer for small files. For larger GIFs prefer one "
-    "display.draw_url call with an existing usable direct URL. Do not re-upload a usable URL. "
-    "Source canvas max 240x320, max 512 frames, 10 fps. No device confirmation step. "
-    "For memes include gesture and speed in THIS call, instead of a separate gesture call. "
-    "Choose happy for funny/excited, curious for confused/surprised, nod for agreement, shake for disapproval "
-    "and neutral for stillness; match context. Use fast for quick memes. Movement starts on display, even without speech.");
+    "CRC32, begin/chunks/commit or preparatory display.info call. Max 6144 decoded bytes. "
+    "Bunty immediately decodes and zooms it edge-to-edge on the full 240x320 screen with proportions preserved. "
+    "Use for memes, funny cat GIFs when tasks are out of scope, or reaction animations. "
+    "For memes/reactions include gesture and speed in THIS call (happy, curious, nod, shake, puppytilt, shimmy, bashful). "
+    "Movement starts on display immediately.");
   cJSON *gifData=cJSON_AddObjectToObject(cJSON_AddObjectToObject(gifShow,"required"),"data_base64");
   cJSON_AddStringToObject(gifData,"type","string");
   cJSON_AddStringToObject(gifData,"description","Base64 of the GIF file, at most 8192 characters, no data URL prefix or whitespace.");
@@ -309,6 +339,35 @@ void bunty_muse_register(cJSON *commands) {
   }
   cJSON_AddItemToObject(look,"required",required); cJSON_AddItemToObject(look,"optional",cJSON_CreateObject());
   cJSON_AddItemToObject(commands,"bunty.look",look);
+
+  cJSON *react=cJSON_AddObjectToObject(commands,"bunty.react");
+  cJSON_AddStringToObject(react,"description",
+    "Expressive silent pantomime reaction using Bunty's face, servos, and screen without cluttering the display. "
+    "Provide emotion (face eyes: happy, curious, sassy, soft, sad, excited, angry, neutral), "
+    "gesture (servos: nod, shake, puppytilt, shimmy, bashful, happy, curious, neutral), "
+    "speed (fast, normal, slow), text (short 1-to-3 word punchy message, e.g. 'ALL DONE', 'ON IT', 'LOOK UP', 'YES!'), "
+    "and optional emoji ('🎉', '❤️', '👍', '👀', '⚡', '🤖', '🔥', '✨').");
+  cJSON *reactOptions=cJSON_AddObjectToObject(react,"optional");
+  for(const char *paramName:{"emotion","gesture","speed","text","emoji"}) {
+    cJSON *param=cJSON_AddObjectToObject(reactOptions,paramName);
+    cJSON_AddStringToObject(param,"type","string");
+  }
+
+  cJSON *progress=cJSON_AddObjectToObject(commands,"bunty.progress");
+  cJSON_AddStringToObject(progress,"description",
+    "Show live progress on Bunty's screen during long-running background tasks. "
+    "Display a clean status message (e.g. 'SEARCHING...', 'RUNNING...', 'UPDATING') and optional percent 0-100.");
+  cJSON *progRequired=cJSON_AddObjectToObject(progress,"required");
+  cJSON *progStatus=cJSON_AddObjectToObject(progRequired,"status");
+  cJSON_AddStringToObject(progStatus,"type","string");
+  cJSON_AddStringToObject(progStatus,"description","Short status text, 1-24 UTF-8 bytes.");
+  cJSON *progOptional=cJSON_AddObjectToObject(progress,"optional");
+  cJSON *progPercent=cJSON_AddObjectToObject(progOptional,"percent");
+  cJSON_AddStringToObject(progPercent,"type","number");
+  cJSON_AddStringToObject(progPercent,"description","Optional percentage from 0 to 100, or -1 for indeterminate progress.");
+  cJSON *progDone=cJSON_AddObjectToObject(progOptional,"done");
+  cJSON_AddStringToObject(progDone,"type","boolean");
+  cJSON_AddStringToObject(progDone,"description","True when task finishes to clear progress indicator.");
 }
 bool bunty_muse_parse_image_gesture(cJSON *params,int *kind,int *speed) {
   *kind=-1;*speed=int(speechGesture::Speed::Fast);
@@ -323,7 +382,7 @@ bool bunty_muse_parse_image_gesture(cJSON *params,int *kind,int *speed) {
 }
 void bunty_muse_image_gesture(int kind,int speed) {
   if(kind<0) {logPrintf("[motion] no reaction attached to image\n");return;}
-  if(kind<0||kind>int(speechGesture::Kind::Happy)||speed<0||speed>int(speechGesture::Speed::Fast)||!muse::displayActive()||muse::imageFetching())return;
+  if(kind<0||kind>int(speechGesture::Kind::Bashful)||speed<0||speed>int(speechGesture::Speed::Fast)||!muse::displayActive()||muse::imageFetching())return;
   speechGesture::clearSpeech();
   speechGesture::requestVisual(static_cast<speechGesture::Kind>(kind),millis(),static_cast<speechGesture::Speed>(speed));
 }
@@ -424,7 +483,7 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
     cJSON *value=cJSON_GetObjectItem(params,"gesture");
     speechGesture::Kind kind;
     if(!cJSON_IsString(value) || !speechGesture::parse(value->valuestring,kind))
-      return result(false,"gesture must be neutral, nod, shake, curious or happy");
+      return result(false,"gesture must be neutral, nod, shake, curious, happy, puppytilt, shimmy or bashful");
     auto speed=speechGesture::Speed::Fast;
     cJSON *tempo=cJSON_GetObjectItem(params,"speed"),*when=cJSON_GetObjectItem(params,"when");
     if(tempo&&(!cJSON_IsString(tempo)||!speechGesture::parseSpeed(tempo->valuestring,speed)))
@@ -436,6 +495,92 @@ cJSON *bunty_muse_command(const char *name,cJSON *params) {
     else if(!strcmp(trigger,"now")||(!strcmp(trigger,"auto")&&muse::displayActive()&&!muse::imageFetching()))speechGesture::requestVisual(kind,now,speed);
     else if(!strcmp(trigger,"speech")||!strcmp(trigger,"auto"))speechGesture::request(kind,now,speed,strcmp(trigger,"speech")!=0);
     else return result(false,"when must be auto, speech, display or now");
+    return result(true);
+  }
+  if(!strcmp(name,"bunty.react")) {
+    cJSON *em=cJSON_GetObjectItem(params,"emotion");
+    cJSON *gest=cJSON_GetObjectItem(params,"gesture");
+    cJSON *tempo=cJSON_GetObjectItem(params,"speed");
+    cJSON *txt=cJSON_GetObjectItem(params,"text");
+    cJSON *emo=cJSON_GetObjectItem(params,"emoji");
+
+    Emotion emotion=Emotion::Neutral;
+    bool hasEmotion=false;
+    if(em&&cJSON_IsString(em)&&em->valuestring[0]) {
+      emotion=parseEmotion(em->valuestring);
+      hasEmotion=true;
+    }
+
+    speechGesture::Kind gesture=speechGesture::Kind::Neutral;
+    bool hasGesture=false;
+    if(gest&&cJSON_IsString(gest)&&gest->valuestring[0]) {
+      if(!speechGesture::parse(gest->valuestring,gesture))
+        return result(false,"Invalid gesture. Choose: neutral, nod, shake, curious, happy, puppytilt, shimmy, bashful");
+      hasGesture=true;
+    }
+
+    speechGesture::Speed speed=speechGesture::Speed::Fast;
+    if(tempo&&cJSON_IsString(tempo)&&tempo->valuestring[0]) {
+      if(!speechGesture::parseSpeed(tempo->valuestring,speed))
+        return result(false,"speed must be fast, normal or slow");
+    }
+
+    char replyBuf[64]={};
+    if(txt&&cJSON_IsString(txt)) {
+      strlcpy(replyBuf,txt->valuestring,sizeof(replyBuf));
+    }
+    if(emo&&cJSON_IsString(emo)&&emo->valuestring[0]) {
+      if(replyBuf[0]) strlcat(replyBuf," ",sizeof(replyBuf));
+      strlcat(replyBuf,emo->valuestring,sizeof(replyBuf));
+    }
+
+    if(!hasGesture && hasEmotion) {
+      switch(emotion) {
+        case Emotion::Happy:
+        case Emotion::Excited: gesture=speechGesture::Kind::Happy; break;
+        case Emotion::Curious: gesture=speechGesture::Kind::PuppyTilt; break;
+        case Emotion::Sassy: gesture=speechGesture::Kind::Shimmy; break;
+        case Emotion::Soft: gesture=speechGesture::Kind::Bashful; break;
+        case Emotion::Sad:
+        case Emotion::Angry: gesture=speechGesture::Kind::Shake; break;
+        default: gesture=speechGesture::Kind::Nod; break;
+      }
+      hasGesture=true;
+    }
+
+    if(hasGesture) {
+      speechGesture::clearSpeech();
+      speechGesture::requestVisual(gesture,millis(),speed);
+    }
+
+    char turnText[128]={};
+    if(hasEmotion) snprintf(turnText,sizeof(turnText),"[%s] %s",emotionName(emotion),replyBuf);
+    else strlcpy(turnText,replyBuf,sizeof(turnText));
+    extern void bunty_muse_queue_tts(const char *);
+    bunty_muse_queue_tts(turnText[0]?turnText:"[happy]");
+    return result(true);
+  }
+  if(!strcmp(name,"bunty.progress")) {
+    cJSON *done=cJSON_GetObjectItem(params,"done");
+    if(done && cJSON_IsTrue(done)) {
+      muse::clearProgress();
+      extern void bunty_muse_agent_busy(bool);
+      bunty_muse_agent_busy(false);
+      return result(true);
+    }
+    cJSON *status=cJSON_GetObjectItem(params,"status");
+    if(!cJSON_IsString(status)||!status->valuestring[0])
+      return result(false,"status is required and must be 1 to 24 characters");
+    cJSON *pct=cJSON_GetObjectItem(params,"percent");
+    int percent=-1;
+    if(pct&&cJSON_IsNumber(pct)) {
+      percent=int(pct->valuedouble);
+      if(percent<0)percent=-1;
+      if(percent>100)percent=100;
+    }
+    muse::setProgress(status->valuestring,percent);
+    extern void bunty_muse_agent_busy(bool);
+    bunty_muse_agent_busy(true);
     return result(true);
   }
   if(strcmp(name,"bunty.look")) return result(false,"Unknown Bunty command");

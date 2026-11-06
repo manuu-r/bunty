@@ -10,6 +10,7 @@ void bunty_muse_register(cJSON *commands);
 cJSON *bunty_muse_command(const char *name, cJSON *params);
 void bunty_muse_reply(const char *text);
 void bunty_muse_agent_busy(bool busy);
+void bunty_muse_agent_activity(const char *activity);
 bool bunty_muse_parse_image_gesture(cJSON *params,int *kind,int *speed);
 void bunty_muse_image_gesture(int kind,int speed);
 bool bunty_muse_chat_init(void);

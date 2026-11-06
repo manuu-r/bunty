@@ -33,7 +33,7 @@ No eFuses, NVS encryption, Secure Boot, tunnel, or OTA are enabled by this port.
 3. When Bunty shows its confirmation screen, tap Yes.
 4. Complete Wi-Fi/account provisioning in the phone app.
 5. Tap Bunty's mic control once to start a conversation. Local energy VAD detects
-   speech, preserves 320 ms of opening audio, and sends after a 900 ms pause.
+   speech, preserves 320 ms of opening audio, and sends after a 660 ms pause.
    Utterances are capped at 30 seconds; quiet waiting opens no Muse request.
 6. Muse transcribes the utterance and sends its reply. Captions page on the LCD;
    the gateway's Aura TTS speaks each completed message. Listening resumes after
@@ -81,6 +81,16 @@ PCM; see [VOICE.md](VOICE.md#one-clock-for-sound-face-and-head).
 Deploy from `iot-gateway/` with `npm run deploy`. No new TTS provider key is
 needed: the existing Workers AI binding and gateway credential are reused.
 
+### Cloudflare Gateway Fallback Turn
+
+When Muse Cloud is offline or unreachable (`!muse_hatch_ready()`) but Wi-Fi remains
+connected, Bunty falls back automatically to Cloudflare Gateway:
+- **Endpoint**: `POST /v1/voice/turn` (or `/v1/turn`)
+- **Request**: Buffered mono 16 kHz 16-bit linear PCM utterance (`audio/l16;rate=16000;channels=1`)
+- **Processing**: Cloudflare Gateway runs Whisper STT (`@cf/openai/whisper`), runs Claude 3.5 Haiku with Bunty's system prompt and session memory, and synthesizes the reply with Deepgram Aura-1 TTS (`arcas`)
+- **Response**: Framed PCM with expression cues (`application/vnd.bunty.speech`) streamed back directly into Bunty's `SpeechPlayer`, lip-sync, and servo gestures
+- **Captions**: Gateway returns `X-Reply` percent-encoded in HTTP headers, decoded by Bunty to show text captions on the LCD during speech
+
 ## Remote commands
 
 The capabilities are included in Muse's `commands_v2` registration. With
@@ -89,12 +99,15 @@ withheld and rejected, so Muse speaks that content instead:
 
 | Command | Behavior |
 | --- | --- |
+| `bunty.react` | Expressive silent pantomime reaction with emotion eyes, physical head gesture, speed, and clean punchy 1-to-3 word text / emoji on screen |
+| `bunty.progress` | Live progress bar and status text displayed during long-running tasks (`status`, `percent` 0-100, `done`) |
 | `display.draw_url` | Fetch and display a baseline JPEG, animated GIF, or big-endian RGB565 image from HTTP(S) |
 | `display.show_text` | Wrapped, paged text with an optional title and colours |
 | `display.show_gif` | Fast one-call fullscreen GIF display: only data_base64 required, max 6 KiB, no session metadata or checksum |
 | `bunty.gif_transfer` | Receive a native GIF in bounded base64 chunks; CRC32-checked commit, progress and cancellation (see [GIF.md](GIF.md#direct-file-transfer)) |
 | `display.info` | Screen dimensions/formats, download state, memory, and previous reset reason |
 | `display.show_animation` | Dismiss remote content and restore Bunty's face |
+| `bunty.gesture` | Trigger a head gesture (`nod`, `shake`, `puppytilt`, `shimmy`, `bashful`, `happy`, `curious`, `neutral`) |
 | `bunty.look` | Queue yaw/pitch movement |
 
 The image area is the full rectangular **240 × 320** LCD, 16-bit RGB565. JPEGs

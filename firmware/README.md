@@ -100,7 +100,7 @@ worker. Bunty displays its animated face while idle.
 
 Tap the microphone control to enter conversation mode. Local energy VAD opens
 an utterance after speech begins, preserves 320 ms of audio, and sends after a
-900 ms pause. Muse returns text; the gateway's `/v1/tts` route streams speech.
+660 ms pause. Muse returns text; the gateway's `/v1/tts` route streams speech.
 Capture pauses during playback, then listening resumes automatically. Eight
 seconds of silence exits. See [MUSE.md](MUSE.md) for limits and tap behavior.
 

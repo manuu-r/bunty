@@ -46,18 +46,11 @@ class Microphone {
   uint32_t levelCount_ = 0;
 };
 
-// MAX98357 on its own I2S port. The amplifier is shut down whenever the
-// speaker is closed, so it cannot hiss or pick up the servos' PWM.
+// Silent companion: no speaker hardware installed.
 class Speaker {
  public:
-  bool open();
-  void close();
-  bool isOpen() const { return open_; }
-  // Mono 16 kHz samples; scaled to volumePercent and duplicated to both slots.
-  bool write(const int16_t *samples, size_t count, uint8_t volumePercent);
-
- private:
-  i2s_chan_handle_t channel_ = nullptr;
-  bool installed_ = false;
-  bool open_ = false;
+  bool open() { return false; }
+  void close() {}
+  bool isOpen() const { return false; }
+  bool write(const int16_t *, size_t, uint8_t) { return false; }
 };

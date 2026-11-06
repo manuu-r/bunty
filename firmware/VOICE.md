@@ -3,7 +3,7 @@
 [Conversation preview](docs/bunty-listening-preview.png) shows listening,
 thinking and speaking using the real renderer. The conversation screen contains
 only the face and border aura: no waveform, wordmark, phase title, captions or
-close/End/Send controls. Pause for 900 ms to send automatically. Listening stays
+close/End/Send controls. Pause for 660 ms to send automatically. Listening stays
 active through silence and screen changes until a long press ends it or a
 connection/playback failure occurs. Tapping the face during a reply interrupts
 and resumes listening; taps during listening do not end/send it.
@@ -66,7 +66,7 @@ and what already arrived still plays.
 The fetch task decodes into a 4 s PSRAM ring and a separate `muse_audio` task
 feeds I2S. Before this, TLS reads drove the speaker directly over 60 ms of DMA, so
 any stall was an audible gap and the mouth followed the network. Playback starts
-at 300 ms buffered, or when the stream ends; an underrun holds the amplifier on
+at 150 ms buffered, or when the stream ends; an underrun holds the amplifier on
 and resumes at 100 ms. Cues and loudness are published as samples enter the I2S
 queue, about 60 ms before they sound, which covers display frame time and servo
 lag. A tap silences within one 20 ms block rather than waiting for the network.

@@ -10,7 +10,7 @@ namespace audio {
 // Capture relevant headers directly from HTTP events, independent of the
 // client's limited saved-header cache. Never guess PCM format from its body.
 struct TtsHeaders {
-  char type[128]{},order[32]{};
+  char type[128]{},order[32]{},reply[512]{};
   bool invalid=false;
   template<size_t N> void save(char (&out)[N],const char *value) {
     if(!value || strnlen(value,N)>=N || (out[0] && strcasecmp(out,value))) {invalid=true;return;}
@@ -20,6 +20,24 @@ struct TtsHeaders {
     if(!key)return;
     if(!strcasecmp(key,"Content-Type"))save(type,value);
     if(!strcasecmp(key,"X-Audio-Byte-Order"))save(order,value);
+    if(!strcasecmp(key,"X-Reply") && value) {
+      size_t out=0;
+      const char *src=value;
+      while(*src && out+1<sizeof(reply)) {
+        if(*src=='%' && src[1] && src[2]) {
+          auto hex=[](char c)->int {
+            if(c>='0'&&c<='9')return c-'0';
+            if(c>='a'&&c<='f')return c-'a'+10;
+            if(c>='A'&&c<='F')return c-'A'+10;
+            return 0;
+          };
+          reply[out++]=char((hex(src[1])<<4)|hex(src[2]));
+          src+=3;
+        } else if(*src=='+') { reply[out++]=' '; src++; }
+        else { reply[out++]=*src++; }
+      }
+      reply[out]=0;
+    }
   }
   bool valid() const {
     if(invalid || strcasecmp(order,"little-endian"))return false;

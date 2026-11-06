@@ -528,3 +528,104 @@ test("device speech refuses text with nothing to say and requires a credential",
   assert.equal((await worker.fetch(new Request("https://gateway.example/v1/speak"), env)).status, 405);
   assert.equal(calls.length, 0);
 });
+
+function turnRequest(bytes = new Uint8Array(3200), token = validToken) {
+  return new Request("https://gateway.example/v1/voice/turn", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "audio/l16;rate=16000;channels=1",
+      "X-Audio-Byte-Order": "little-endian",
+      "X-Bunty-Session": "testsession12345678",
+    },
+    body: bytes,
+  });
+}
+
+test("device turn runs STT, Claude LLM, and Aura TTS when Muse is offline", async () => {
+  const aiCalls = [];
+  const { env } = makeEnv({
+    AI: {
+      async run(model, input) {
+        aiCalls.push({ model, input });
+        if (model === "@cf/openai/whisper") {
+          return { text: "What time is it?" };
+        }
+        if (model === "anthropic/test-model") {
+          return { response: "[happy] [nod] It is three in the morning." };
+        }
+        if (model === "@cf/deepgram/aura-1") {
+          return pcmResponse(1, 0, 2, 0);
+        }
+        throw new Error(`Unexpected model ${model}`);
+      },
+    },
+  });
+
+  const response = await worker.fetch(turnRequest(), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Content-Type"), "application/vnd.bunty.speech;rate=16000;channels=1");
+  assert.equal(response.headers.get("X-Audio-Byte-Order"), "little-endian");
+  assert.equal(decodeURIComponent(response.headers.get("X-Transcript")), "What time is it?");
+  assert.equal(decodeURIComponent(response.headers.get("X-Reply")), "[happy] [nod] It is three in the morning.");
+
+  assert.equal(aiCalls.length, 3);
+  assert.equal(aiCalls[0].model, "@cf/openai/whisper");
+  assert.equal(aiCalls[1].model, "anthropic/test-model");
+  assert.equal(aiCalls[1].input.messages.at(-1).content, "What time is it?");
+  assert.equal(aiCalls[2].model, "@cf/deepgram/aura-1");
+
+  const frames = readSpeechFrames(new Uint8Array(await response.arrayBuffer()));
+  assert.ok(frames.length >= 3);
+  // Cues, audio, end
+  assert.equal(frames.find((f) => f.type === 2) !== undefined, true);
+  assert.equal(frames.find((f) => f.type === 1) !== undefined, true);
+  assert.equal(frames.find((f) => f.type === 3) !== undefined, true);
+});
+
+test("device turn validates credentials, method, and audio length", async () => {
+  const { env, calls } = makeEnv();
+  // Wrong method
+  assert.equal((await worker.fetch(new Request("https://gateway.example/v1/voice/turn", { method: "GET" }), env)).status, 405);
+  // Missing auth
+  assert.equal((await worker.fetch(turnRequest(new Uint8Array(3200), "bad_token"), env)).status, 401);
+  // Audio too short (< 1600 bytes)
+  assert.equal((await worker.fetch(turnRequest(new Uint8Array(500)), env)).status, 400);
+  assert.equal(calls.length, 0);
+});
+
+test("device turn in silent mode returns JSON and skips TTS invocation", async () => {
+  const aiCalls = [];
+  const { env } = makeEnv({
+    AI: {
+      async run(model, input) {
+        aiCalls.push(model);
+        if (model === "@cf/openai/whisper") return { text: "Hello" };
+        if (model === "anthropic/test-model") return { response: "[happy] [nod] Hi!" };
+        throw new Error(`Unexpected model ${model}`);
+      },
+    },
+  });
+
+  const request = new Request("https://gateway.example/v1/voice/turn", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${validToken}`,
+      "Content-Type": "audio/l16;rate=16000;channels=1",
+      Accept: "application/json",
+    },
+    body: new Uint8Array(3200),
+  });
+
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Content-Type"), "application/json");
+  const data = await response.json();
+  assert.equal(data.ok, true);
+  assert.equal(data.transcript, "Hello");
+  assert.equal(data.reply, "[happy] [nod] Hi!");
+  assert.equal(data.emotion, "happy");
+  assert.equal(data.gesture, "nod");
+  // Only STT and LLM called, NO Aura TTS!
+  assert.deepEqual(aiCalls, ["@cf/openai/whisper", "anthropic/test-model"]);
+});

@@ -36,6 +36,14 @@ class BuntyAnimations {
   void drawWakeIcon(const char *label);
   void clearWakeIcon();
 
+  // Punchy 1-to-3 word reaction text or emoji below the eyes.
+  void drawReaction(const char *text);
+  void clearReaction();
+
+  // Progress status and bar during long-running tasks between the status bar and the eyes.
+  void drawProgress(const char *status, int percent, uint32_t now);
+  void clearProgress();
+
   // A scrolling level history along the bottom edge, drawn while Bunty is
   // capturing speech. `levels` is a ring of 0-100 values; `head` is the index
   // the next sample would occupy, so the oldest bar is drawn leftmost.

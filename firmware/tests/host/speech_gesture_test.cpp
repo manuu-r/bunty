@@ -7,7 +7,7 @@ int main() {
   using namespace speechGesture;
   Kind kind;
   assert(!parse(nullptr,kind) && !parse("giant",kind));
-  for(const char *name:{"neutral","nod","shake","curious","happy"}) {
+  for(const char *name:{"neutral","nod","shake","curious","happy","puppytilt","shimmy","bashful","tilt","wiggle","shy"}) {
     assert(parse(name,kind));
     for(uint32_t t=0;t<4000;++t) {
       auto p=pose(kind,t);
@@ -27,7 +27,7 @@ int main() {
   assert(!parseSpeed("turbo",speed));
   for(const char *name:{"slow","normal","fast"}) {
     assert(parseSpeed(name,speed));
-    for(auto kind:{Kind::Neutral,Kind::Nod,Kind::Shake,Kind::Curious,Kind::Happy}) {
+    for(auto kind:{Kind::Neutral,Kind::Nod,Kind::Shake,Kind::Curious,Kind::Happy,Kind::PuppyTilt,Kind::Shimmy,Kind::Bashful}) {
       for(uint32_t t=0;t<=duration(speed)+20;++t) {
         const auto p=pose(kind,t,speed);
         assert(std::isfinite(p.yaw)&&std::isfinite(p.pitch));

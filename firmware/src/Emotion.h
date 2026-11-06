@@ -18,3 +18,11 @@ inline Emotion parseEmotion(const char *name) {
   }
   return Emotion::Neutral;
 }
+
+inline const char *emotionName(Emotion emotion) {
+  static const char *const kNames[] = {
+      "neutral", "soft", "happy", "excited", "angry", "sad", "curious", "sassy",
+  };
+  const uint8_t index = static_cast<uint8_t>(emotion);
+  return index < static_cast<uint8_t>(Emotion::Count) ? kNames[index] : "neutral";
+}

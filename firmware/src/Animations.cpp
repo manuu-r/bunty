@@ -140,4 +140,74 @@ void BuntyAnimations::clearWakeIcon() {
   display_.present(0, kWakeBandTop, kScreenWidth, kWakeBandHeight);
 }
 
+void BuntyAnimations::drawReaction(const char *text) {
+  if (!text || !text[0]) return;
+  constexpr int16_t kReactionTop = 232;
+  constexpr int16_t kReactionHeight = 68;
+  display_.fillRect(0, kReactionTop, kScreenWidth, kReactionHeight, kBackground);
+
+  const size_t len = strlen(text);
+  const GFXfont *font = (len <= 12) ? BuntyFonts::kHeading : BuntyFonts::kBody;
+  display_.setFont(font);
+  display_.setTextSize(1);
+  display_.setTextWrap(false);
+  display_.setTextColor(cfg::ui::kText);
+
+  int16_t x0, y0;
+  uint16_t w, h;
+  display_.getTextBounds(text, 0, 0, &x0, &y0, &w, &h);
+
+  const int16_t x = (kScreenWidth - int16_t(w)) / 2 - x0;
+  const int16_t y = kReactionTop + (kReactionHeight + int16_t(h)) / 2;
+  display_.setCursor(x, y);
+  display_.print(text);
+
+  display_.present(0, kReactionTop, kScreenWidth, kReactionHeight);
+}
+
+void BuntyAnimations::clearReaction() {
+  constexpr int16_t kReactionTop = 232;
+  constexpr int16_t kReactionHeight = 68;
+  display_.fillRect(0, kReactionTop, kScreenWidth, kReactionHeight, kBackground);
+  face_.invalidateMouth();
+  face_.drawMouth(display_, 0.0f, millis(), kBackground);
+  display_.present(0, kReactionTop, kScreenWidth, kReactionHeight);
+}
+
+void BuntyAnimations::drawProgress(const char *status, int percent, uint32_t now) {
+  display_.fillRect(0, kWakeBandTop, kScreenWidth, kWakeBandHeight, kBackground);
+  if (status && status[0]) {
+    display_.setFont(BuntyFonts::kBody);
+    display_.setTextSize(1);
+    display_.setTextWrap(false);
+    display_.setTextColor(cfg::ui::kText);
+    int16_t x0, y0;
+    uint16_t w, h;
+    display_.getTextBounds(status, 0, 0, &x0, &y0, &w, &h);
+    const int16_t x = (kScreenWidth - int16_t(w)) / 2 - x0;
+    display_.setCursor(x, kWakeBandTop + 24);
+    display_.print(status);
+  }
+  constexpr int16_t barX = 40, barY = kWakeBandTop + 36, barW = 160, barH = 5;
+  display_.fillRoundRect(barX, barY, barW, barH, 2, cfg::ui::kBorder);
+  if (percent >= 0 && percent <= 100) {
+    const int16_t fillW = (barW * percent) / 100;
+    if (fillW > 0) {
+      display_.fillRoundRect(barX, barY, fillW, barH, 2, cfg::ui::kAccent);
+    }
+  } else {
+    constexpr int16_t pillW = 36;
+    const int16_t travel = barW - pillW;
+    const float cycle = sinf(float(now % 2000) * (2.0f * 3.14159f / 2000.0f));
+    const int16_t pillX = barX + int16_t((cycle * 0.5f + 0.5f) * float(travel));
+    display_.fillRoundRect(pillX, barY, pillW, barH, 2, cfg::ui::kAccent);
+  }
+  display_.present(0, kWakeBandTop, kScreenWidth, kWakeBandHeight);
+}
+
+void BuntyAnimations::clearProgress() {
+  clearWakeIcon();
+}
+
+
 

@@ -5,13 +5,16 @@
 #include <cstring>
 
 namespace speechGesture {
-enum class Kind : uint8_t { Neutral, Nod, Shake, Curious, Happy };
+enum class Kind : uint8_t { Neutral, Nod, Shake, Curious, Happy, PuppyTilt, Shimmy, Bashful };
 enum class Speed : uint8_t { Slow, Normal, Fast };
 struct Request {Kind kind=Kind::Neutral;Speed speed=Speed::Fast;};
 inline bool parse(const char *name, Kind &out) {
-  constexpr const char *names[] = {"neutral", "nod", "shake", "curious", "happy"};
+  constexpr const char *names[] = {"neutral", "nod", "shake", "curious", "happy", "puppytilt", "shimmy", "bashful"};
   if(!name) return false;
-  for(unsigned i=0;i<5;++i) if(!strcmp(name,names[i])) {out=static_cast<Kind>(i);return true;}
+  for(unsigned i=0;i<8;++i) if(!strcmp(name,names[i])) {out=static_cast<Kind>(i);return true;}
+  if(!strcmp(name,"tilt")) {out=Kind::PuppyTilt;return true;}
+  if(!strcmp(name,"wiggle")) {out=Kind::Shimmy;return true;}
+  if(!strcmp(name,"shy")) {out=Kind::Bashful;return true;}
   return false;
 }
 inline bool parseSpeed(const char *name,Speed &out) {
@@ -20,15 +23,15 @@ inline bool parseSpeed(const char *name,Speed &out) {
   return false;
 }
 // Three bounded atomic mailboxes; no SDK callback ever drives a servo.
-constexpr uint32_t kClockMask=0x3ffffff;
+constexpr uint32_t kClockMask=0x1ffffff;
 inline std::atomic<uint32_t> pending{0},displayPending{0},visualPending{0},cancelGeneration{0};
 inline uint32_t packed(Kind kind,Speed speed,uint32_t now,bool displayEligible=false) {
-  return ((now&kClockMask)<<6)|(displayEligible?32u:0u)|(uint32_t(speed)<<3)|(uint32_t(kind)+1);
+  return ((now&kClockMask)<<7)|(displayEligible?64u:0u)|(uint32_t(speed)<<4)|(uint32_t(kind)+1);
 }
 inline bool takeMailbox(std::atomic<uint32_t> &box,Request &out,uint32_t now,uint32_t expiry) {
   const uint32_t value=box.exchange(0);
-  if(!value||(((now&kClockMask)-(value>>6))&kClockMask)>expiry)return false;
-  out={static_cast<Kind>((value&7)-1),static_cast<Speed>((value>>3)&3)};return true;
+  if(!value||(((now&kClockMask)-(value>>7))&kClockMask)>expiry)return false;
+  out={static_cast<Kind>((value&15)-1),static_cast<Speed>((value>>4)&3)};return true;
 }
 inline void clearSpeech() {pending.store(0);}
 inline void clearVisual() {displayPending.store(0);visualPending.store(0);++cancelGeneration;}
@@ -45,9 +48,9 @@ inline void onDisplay(uint32_t now) {
   bool ready=takeMailbox(displayPending,out,now,90000);
   if(!ready) {
     uint32_t value=pending.load();
-    if((value&32)&&pending.compare_exchange_strong(value,0)&&
-       (((now&kClockMask)-(value>>6))&kClockMask)<=20000) {
-      out={static_cast<Kind>((value&7)-1),static_cast<Speed>((value>>3)&3)};ready=true;
+    if((value&64)&&pending.compare_exchange_strong(value,0)&&
+       (((now&kClockMask)-(value>>7))&kClockMask)<=20000) {
+      out={static_cast<Kind>((value&15)-1),static_cast<Speed>((value>>4)&3)};ready=true;
     }
   }
   if(ready) {
@@ -59,8 +62,8 @@ inline uint32_t duration(Speed speed) {return speed==Speed::Fast?900:speed==Spee
 inline float rate(Speed speed) {return speed==Speed::Fast?60.f:speed==Speed::Normal?50.f:35.f;}
 inline uint32_t visualDuration(Speed speed) {return speed==Speed::Fast?1300:speed==Speed::Normal?1800:2400;}
 inline const char *name(Kind kind) {
-  constexpr const char *names[]={"neutral","nod","shake","curious","happy"};
-  return names[unsigned(kind)<5?unsigned(kind):0];
+  constexpr const char *names[]={"neutral","nod","shake","curious","happy","puppytilt","shimmy","bashful"};
+  return names[unsigned(kind)<8?unsigned(kind):0];
 }
 struct Pose {float yaw=0,pitch=0;};
 // Hold distinct poses, letting the rate-capped motor reach them. Speech keeps
@@ -69,13 +72,14 @@ inline Pose visualPose(Kind kind,uint32_t elapsed,Speed speed=Speed::Fast) {
   const uint32_t total=visualDuration(speed);
   if(elapsed>=total)return {};
   const float t=float(elapsed)/total;
-  if(kind==Kind::Curious)return t<.70f?Pose{18,15}:Pose{};
+  if(kind==Kind::Curious || kind==Kind::PuppyTilt)return t<.70f?Pose{18,15}:Pose{};
   const float direction=t<.28f?1.f:t<.70f?-1.f:0.f;
   switch(kind) {
     case Kind::Nod:return {0,15*direction};
     case Kind::Shake:return {18*direction,0};
-    case Kind::Happy:return {16*direction,14*direction};
-    case Kind::Neutral:case Kind::Curious:return {};
+    case Kind::Happy:case Kind::Shimmy:return {16*direction,14*direction};
+    case Kind::Bashful:return {-10*direction,-14*direction};
+    case Kind::Neutral:case Kind::Curious:case Kind::PuppyTilt:return {};
   }
   return {};
 }
@@ -91,6 +95,17 @@ inline Pose pose(Kind kind,uint32_t elapsed,Speed speed=Speed::Slow) {
     case Kind::Shake:return {12*wave,0};
     case Kind::Curious:return {12*envelope,8*envelope};
     case Kind::Happy:return {6*wave,8*wave};
+    case Kind::PuppyTilt: {
+      const float yawSnap = t < 0.25f ? (t / 0.25f) : (t < 0.75f ? 1.0f : (1.0f - (t - 0.75f) / 0.25f));
+      return {12.0f * yawSnap, 8.0f * yawSnap};
+    }
+    case Kind::Shimmy: {
+      const float shimmyWave = std::sin(4.0f * 6.2831853f * t) * envelope;
+      return {12.0f * shimmyWave, 4.0f * envelope};
+    }
+    case Kind::Bashful: {
+      return {-8.0f * envelope, -10.0f * envelope};
+    }
     case Kind::Neutral:return {};
   }
   return {};
